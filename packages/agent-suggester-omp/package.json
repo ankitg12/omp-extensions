@@ -1,0 +1,27 @@
+{
+	"name": "@ankitg12/agent-suggester",
+	"version": "0.1.0",
+	"description": "Periodic reorientation nudges for Oh My Pi (OMP) — injects curated questions/quotes at configurable intervals to break cognitive loops and shift perspective",
+	"license": "MIT",
+	"author": "Ankit Gaur",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"extension",
+		"reorientation",
+		"productivity",
+		"mindfulness",
+		"ai-agent"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/ankitg12/omp-extensions-public",
+		"directory": "packages/agent-suggester-omp"
+	},
+	"pi": {
+		"extensions": ["./agent-suggester.ts"]
+	},
+	"publishConfig": {
+		"registry": "https://npm.pkg.github.com"
+	}
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@ankitg12/omp-screenshot",
+  "version": "0.1.0",
+  "description": "OMP slash command to capture a screenshot and attach it to the conversation",
+  "license": "MIT",
+  "author": "Ankit Gaur",
+  "keywords": ["pi-package", "pi-extension"],
+  "pi": {
+    "extensions": ["./omp-screenshot.ts"]
+  }
+}

@@ -1,0 +1,5 @@
+# Python deps for capture_window.py (install into the interpreter referenced by omp-screenshot.ts)
+windows-capture>=2.0.0   # Windows.Graphics.Capture engine (primary): occlusion/GPU-safe window capture
+pywin32>=306             # window enumeration + PrintWindow fallback
+Pillow>=10.0.0           # image save + black-frame check + primary-monitor grab
+mss>=9.0.0               # physical monitor count
