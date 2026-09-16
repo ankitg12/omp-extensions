@@ -1,0 +1,27 @@
+{
+  "name": "@ankitg12/omp-output-styles",
+  "version": "0.1.0",
+  "description": "Output styles extension for Oh My Pi (OMP) — interactive learning mode and explanatory insights with zero overhead when disabled",
+  "license": "MIT",
+  "author": "Ankit Gaur",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "omp-extension",
+    "extension",
+    "output-style",
+    "learning-mode",
+    "explanatory-mode",
+    "ai-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ankitg12/omp-extensions-pub",
+    "directory": "packages/omp-output-styles"
+  },
+  "pi": {
+    "extensions": [
+      "./output-styles.ts"
+    ]
+  }
+}
