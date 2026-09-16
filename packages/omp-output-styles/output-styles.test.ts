@@ -10,10 +10,14 @@ import outputStyles, {
   appendPrompt,
 } from "./output-styles.ts";
 
-test("getAvailableStyles discovers bundled styles", () => {
+test("getAvailableStyles discovers bundled styles including manual", () => {
   const styles = getAvailableStyles();
   expect(styles["learning"]).toBeDefined();
   expect(styles["explanatory"]).toBeDefined();
+  expect(styles["manual"]).toBeDefined();
+  const manualPrompt = loadStylePrompt("manual", styles);
+  expect(manualPrompt).toContain("manual test execution");
+  expect(manualPrompt).toContain("Proactive State Verification");
 });
 
 test("normalizeStyle parses keywords and dynamic styles", () => {
