@@ -1,0 +1,15 @@
+{
+  "name": "@ankitg12/tools-expanded-default",
+  "version": "0.1.0",
+  "description": "Expand tool results by default on session start in Oh My Pi (OMP)",
+  "license": "MIT",
+  "author": "Ankit Gaur",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "tools-expanded"
+  ],
+  "pi": {
+    "extensions": ["./tools-expanded-default.ts"]
+  }
+}

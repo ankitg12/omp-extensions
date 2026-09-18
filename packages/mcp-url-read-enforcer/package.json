@@ -1,0 +1,16 @@
+{
+  "name": "@ankitg12/mcp-url-read-enforcer",
+  "version": "0.1.0",
+  "description": "Intercept web URLs passed to read tool and enforce local-reader MCP tool",
+  "license": "MIT",
+  "author": "Ankit Gaur",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "mcp",
+    "local-reader"
+  ],
+  "pi": {
+    "extensions": ["./mcp-url-read-enforcer.ts"]
+  }
+}
