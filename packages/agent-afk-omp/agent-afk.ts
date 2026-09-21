@@ -25,13 +25,25 @@
 // so they accumulate across AFK invocations and are never clobbered.
 
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { appendFileSync } from "fs";
+import { appendFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { loadConfig } from "./afk-state";
 
-function buildAfkPrompt(sessionId: string): string {
-	const noteFile = `~/Notes/afk-notes/${sessionId}.md`;
+function getNoteTarget(sessionId: string): { relativePath: string; fullPath: string; dirPath: string } {
+	const now = new Date();
+	const yyyy = now.getFullYear();
+	const mm = String(now.getMonth() + 1).padStart(2, "0");
+	const dd = String(now.getDate()).padStart(2, "0");
+	const ym = `${yyyy}-${mm}`;
+	const filename = `${yyyy}-${mm}-${dd}_${sessionId}.md`;
+	const dirPath = join(homedir(), "Notes", "afk-notes", ym);
+	const fullPath = join(dirPath, filename);
+	const relativePath = `~/Notes/afk-notes/${ym}/${filename}`;
+	return { relativePath, fullPath, dirPath };
+}
+
+function buildAfkPrompt(noteFile: string): string {
 	return `\
 The user is AFK. Switch to autonomous mode with these constraints:
 
@@ -97,9 +109,15 @@ export default function agentAfk(pi: ExtensionAPI) {
 		afkActive = true;
 		autoEngaged = viaAuto;
 		const sessionId = (ctx.sessionManager?.getLeafId?.() ?? "unknown-session").slice(0, 8);
+		const { relativePath, dirPath } = getNoteTarget(sessionId);
+		try {
+			mkdirSync(dirPath, { recursive: true });
+		} catch {
+			// best-effort directory creation
+		}
 		ctx.ui.setStatus(STATUS_KEY, viaAuto ? "AFK 🔴 auto" : "AFK 🔴");
-		ctx.ui.notify(`[afk] engaged${viaAuto ? " (auto)" : ""} — notes → ~/Notes/afk-notes/${sessionId}.md`, "info");
-		pi.sendUserMessage(buildAfkPrompt(sessionId), { deliverAs: "followUp" });
+		ctx.ui.notify(`[afk] engaged${viaAuto ? " (auto)" : ""} — notes → ${relativePath}`, "info");
+		pi.sendUserMessage(buildAfkPrompt(relativePath), { deliverAs: "followUp" });
 	}
 
 	function disengage(ctx: ExtensionContext): void {
