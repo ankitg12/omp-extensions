@@ -54,7 +54,7 @@ The user is AFK. Switch to autonomous mode with these constraints:
 - When done or stopping: append a brief summary to \`${noteFile}\` under a \`## Done <timestamp>\` heading — what was completed, what's next.
 
 **BEFORE STARTING:**
-1. Run \`python3 ~/tools/logseq-goals.py read\` — know today's declared goal (Logseq journal page properties)
+1. Run \`python3 ~/tools/logseq-goals.py read\` — know today's goals in priority order (Logseq journal)
 2. Read \`~/Notes/todo.md\` — pick the highest-priority actionable item
 3. State out loud: "AFK mode: working on [X]. Will stop if [condition]."
 
