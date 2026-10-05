@@ -91,6 +91,10 @@ export default function decayingEffortExtension(pi: ExtensionAPI) {
 				currentLevel,
 				lastProgrammaticLevel,
 			});
+			ctx.ui.notify(
+				`[decaying-effort] Manual override detected (set to ${currentLevel}). Shifted to manual transmission (automatic decay paused).`,
+				"info"
+			);
 			return;
 		}
 
