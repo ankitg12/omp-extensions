@@ -1,0 +1,20 @@
+{
+	"name": "@ankitg12/decaying-effort-omp",
+	"version": "0.1.0",
+	"description": "Automatically steps down thinking effort across the lifetime of an interactive OMP session across all models",
+	"license": "MIT",
+	"author": "Ankit Gaur",
+	"type": "module",
+	"main": "decaying-effort.ts",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"extension",
+		"effort",
+		"thinking",
+		"decay"
+	],
+	"pi": {
+		"extensions": ["./decaying-effort.ts"]
+	}
+}
