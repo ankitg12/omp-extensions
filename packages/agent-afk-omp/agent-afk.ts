@@ -30,6 +30,10 @@ import { join } from "path";
 import { homedir } from "os";
 import { loadConfig } from "./afk-state";
 
+/** Shared-bus channel announcing AFK state changes: `{ active, auto, waitUntil }`. */
+export const AFK_CHANNEL = "afk:changed";
+const ANNOUNCE_TIMEOUT_MS = 5_000;
+
 function getNoteTarget(sessionId: string): { relativePath: string; fullPath: string; dirPath: string } {
 	const now = new Date();
 	const yyyy = now.getFullYear();
@@ -104,7 +108,19 @@ export default function agentAfk(pi: ExtensionAPI) {
 	let checkTimer: NodeJS.Timeout | undefined;
 	let unsubscribeInput: (() => void) | undefined;
 
-	function engage(ctx: ExtensionContext, viaAuto: boolean): void {
+	/**
+	 * Announce AFK state on the shared bus as `afk:changed`. Listeners (e.g. model-shift-omp)
+	 * may call `waitUntil(promise)` to finish work, such as a model switch, before the AFK/back
+	 * prompt is sent. Waits are bounded so a slow listener cannot block AFK.
+	 */
+	async function announce(active: boolean, auto: boolean): Promise<void> {
+		const pending: Promise<unknown>[] = [];
+		pi.events.emit(AFK_CHANNEL, { active, auto, waitUntil: (p: Promise<unknown>) => pending.push(p) });
+		if (pending.length === 0) return;
+		await Promise.race([Promise.allSettled(pending), Bun.sleep(ANNOUNCE_TIMEOUT_MS)]);
+	}
+
+	async function engage(ctx: ExtensionContext, viaAuto: boolean): Promise<void> {
 		if (afkActive) return;
 		afkActive = true;
 		autoEngaged = viaAuto;
@@ -117,16 +133,18 @@ export default function agentAfk(pi: ExtensionAPI) {
 		}
 		ctx.ui.setStatus(STATUS_KEY, viaAuto ? "AFK 🔴 auto" : "AFK 🔴");
 		ctx.ui.notify(`[afk] engaged${viaAuto ? " (auto)" : ""} — notes → ${relativePath}`, "info");
+		await announce(true, viaAuto);
 		pi.sendUserMessage(buildAfkPrompt(relativePath), { deliverAs: "followUp" });
 	}
 
-	function disengage(ctx: ExtensionContext): void {
+	async function disengage(ctx: ExtensionContext): Promise<void> {
 		// Always send — afkActive is in-memory and resets on session restart,
 		// so /back in a resumed session would silently fail with a guard.
 		afkActive = false;
 		autoEngaged = false;
 		ctx.ui.setStatus(STATUS_KEY, "");
 		ctx.ui.notify("[afk] disengaged — welcome back", "info");
+		await announce(false, false);
 		pi.sendUserMessage(BACK_PROMPT, { deliverAs: "followUp" });
 	}
 
@@ -135,7 +153,7 @@ export default function agentAfk(pi: ExtensionAPI) {
 		const elapsed = Date.now() - lastInputAt;
 		if (!afkActive && elapsed >= config.debounceMs) {
 			debug(`checkInactivity: auto-engaging after ${Math.round(elapsed / 1000)}s idle with no input, agent not busy`);
-			engage(ctx, true);
+			void engage(ctx, true);
 		}
 	}
 
@@ -147,7 +165,7 @@ export default function agentAfk(pi: ExtensionAPI) {
 			lastInputAt = Date.now();
 			if (afkActive && autoEngaged) {
 				debug("onTerminalInput: auto-disengaging (input resumed in this session)");
-				disengage(ctx);
+				void disengage(ctx);
 			}
 			return undefined; // observe only, never consume/replace input
 		});
@@ -180,7 +198,7 @@ export default function agentAfk(pi: ExtensionAPI) {
 				ctx.ui.notify("[afk] already active — use /back to return", "info");
 				return;
 			}
-			engage(ctx, false);
+			await engage(ctx, false);
 		},
 	});
 

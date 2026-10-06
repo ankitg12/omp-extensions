@@ -25,6 +25,7 @@ const vars = (over: Partial<RuleVars> = {}): RuleVars => ({
 	elapsed_min: 5,
 	model: "amd-claude/claude-opus-5.5",
 	agent: "main",
+	afk: false,
 	...over,
 });
 const fresh = (): ShiftState => ({ fired: new Set(), paused: false });
@@ -69,6 +70,41 @@ describe("decide", () => {
 	test("runtime error is reported, not thrown", () => {
 		const r = compileRules(env, [{ name: "div", when: "1 / (turns - turns) > 0", use: "x" }]);
 		expect(decide(env, r, vars(), fresh()).kind).toBe("error");
+	});
+});
+
+describe("revert rules", () => {
+	const rules = compileRules(env, [
+		{ name: "away", when: "afk", use: "@smol", revert: true },
+		{ name: "budget", when: "cost > 1", use: "sonnet" },
+	]);
+	test("afk true → switch; rule not ratcheted", () => {
+		const d = decide(env, rules, vars({ afk: true }), fresh());
+		expect(d.kind === "switch" && d.rule.revert).toBe(true);
+	});
+	test("while applied and still true → none, even if another rule matches", () => {
+		const s = { ...fresh(), applied: { rule: "away", from: "p/opus" } };
+		expect(decide(env, rules, vars({ afk: true, cost: 5 }), s).kind).toBe("none");
+	});
+	test("condition false → revert to original model", () => {
+		const s = { ...fresh(), applied: { rule: "away", from: "p/opus" } };
+		expect(decide(env, rules, vars({ afk: false }), s)).toEqual({ kind: "revert", rule: "away", to: "p/opus" });
+	});
+	test("applied rule removed from config → revert", () => {
+		const s = { ...fresh(), applied: { rule: "gone", from: "p/opus" } };
+		expect(decide(env, rules, vars({ afk: true }), s).kind).toBe("revert");
+	});
+	test("restoreState: switched(revert) → applied; reverted → cleared and re-armed", () => {
+		const e = (data: object) => ({ type: "custom", customType: ENTRY_TYPE, data });
+		const on = restoreState([e({ event: "switched", rule: "away", revert: true, from: "p/opus", to: "p/smol", previousEffort: "high" })]);
+		expect(on.applied).toEqual({ rule: "away", from: "p/opus", effort: "high" });
+		expect(on.fired.has("away")).toBe(false);
+		const off = restoreState([
+			e({ event: "switched", rule: "away", revert: true, from: "p/opus", to: "p/smol" }),
+			e({ event: "reverted", rule: "away", to: "p/opus" }),
+		]);
+		expect(off.applied).toBeUndefined();
+		expect(off.lastProgrammatic).toBe("p/opus");
 	});
 });
 

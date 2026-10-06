@@ -7,6 +7,8 @@
  * Usage: bun verify-live.ts [FROM] [TO]   (defaults: @smol @scout)
  * WITH_DECAY=1 also loads ../decaying-effort-omp and fails if it misreads the switch as a manual
  * effort override.
+ * AFK=1 instead loads ../agent-afk-omp with rule `afk → TO (revert)` and runs prompt → /afk → /back,
+ * asserting the models answering are FROM, TO, FROM.
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -18,11 +20,18 @@ import { fileURLToPath } from "node:url";
 const [from = "@smol", to = "@scout"] = process.argv.slice(2);
 const dir = mkdtempSync(join(tmpdir(), "model-shift-live-"));
 const config = join(dir, "model-shift.yml");
-writeFileSync(config, `rules:\n  - name: live-check\n    when: 'turns >= 1'\n    use: '${to}'\n`);
+const afkMode = process.env.AFK === "1";
+writeFileSync(
+	config,
+	afkMode
+		? `rules:\n  - name: live-check\n    when: 'afk'\n    use: '${to}'\n    revert: true\n`
+		: `rules:\n  - name: live-check\n    when: 'turns >= 1'\n    use: '${to}'\n`,
+);
 
 const extension = fileURLToPath(new URL("./model-shift.ts", import.meta.url));
 const args = ["--mode", "rpc", "--no-session", "--no-tools", "--no-lsp", "--no-skills", "--no-rules", "--no-title", "--no-extensions", "--extension", extension, "--model", from];
 if (process.env.WITH_DECAY === "1") args.push("--extension", fileURLToPath(new URL("../decaying-effort-omp/decaying-effort.ts", import.meta.url)));
+if (afkMode) args.push("--extension", fileURLToPath(new URL("../agent-afk-omp/agent-afk.ts", import.meta.url)));
 const child = spawn(process.env.OMP_BIN ?? "omp", args, {
 	cwd: dir,
 	stdio: ["pipe", "pipe", "inherit"],
@@ -32,6 +41,7 @@ const send = (o: object) => child.stdin.write(`${JSON.stringify(o)}\n`);
 
 const models: string[] = [];
 let notice = "";
+const notices: string[] = [];
 let decayOverride = "";
 let agentEnds = 0;
 const timeout = setTimeout(() => finish("timeout after 90s"), 90_000);
@@ -40,8 +50,10 @@ function finish(error?: string) {
 	clearTimeout(timeout);
 	child.stdin.end();
 	child.kill();
-	const passed = !error && !decayOverride && /\[model-shift\] Rule 'live-check'/.test(notice) && models.length >= 2 && models[0] !== models[1];
-	console.log(JSON.stringify({ check: "model-shift-live", from, to, withDecay: process.env.WITH_DECAY === "1", assistantModels: models, notice, decayOverride, error, passed }, null, 1));
+	const switched = /\[model-shift\] Rule 'live-check'/.test(notice) && models.length >= 2 && models[0] !== models[1];
+	const reverted = !afkMode || (models.length >= 3 && models[2] === models[0] && notices.some(n => /no longer holds/.test(n)));
+	const passed = !error && !decayOverride && switched && reverted;
+	console.log(JSON.stringify({ check: "model-shift-live", from, to, afkMode, withDecay: process.env.WITH_DECAY === "1", assistantModels: models, notices, decayOverride, error, passed }, null, 1));
 	process.exitCode = passed ? 0 : 1;
 }
 
@@ -57,12 +69,22 @@ createInterface({ input: child.stdout }).on("line", line => {
 	const msg = (typeof ev.message === "object" && ev.message !== null ? ev.message : {}) as { role?: string; provider?: string; model?: string };
 	if (ev.type === "ready") send({ id: "p1", type: "prompt", message: "Reply with the single word: one" });
 	if (ev.type === "message_end" && msg.role === "assistant") models.push(`${msg.provider}/${msg.model}`);
-	if (ev.type === "extension_ui_request" && ev.method === "notify" && String(ev.message).startsWith("[model-shift]")) notice = String(ev.message);
+	if (ev.type === "extension_ui_request" && ev.method === "notify" && String(ev.message).startsWith("[model-shift]")) {
+		notice ||= String(ev.message);
+		notices.push(String(ev.message));
+	}
 	if (ev.type === "extension_ui_request" && /\[decaying-effort\] Manual override/.test(String(ev.message))) decayOverride = String(ev.message);
 	if (ev.type === "agent_end") {
 		agentEnds++;
 		// agent_end handlers run after the event is emitted; give the switch a moment to land.
-		if (agentEnds === 1) setTimeout(() => send({ id: "p2", type: "prompt", message: "Reply with the single word: two" }), 1500);
-		if (agentEnds === 2) finish();
+		const next = (message: string) => setTimeout(() => send({ id: `p${agentEnds + 1}`, type: "prompt", message }), 1500);
+		if (afkMode) {
+			if (agentEnds === 1) next("/afk");
+			if (agentEnds === 2) next("/back");
+			if (agentEnds === 3) finish();
+		} else {
+			if (agentEnds === 1) next("Reply with the single word: two");
+			if (agentEnds === 2) finish();
+		}
 	}
 });

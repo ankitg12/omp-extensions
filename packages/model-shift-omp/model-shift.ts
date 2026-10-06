@@ -16,15 +16,21 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Environment } from "@marcbachmann/cel-js";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 export const ENTRY_TYPE = "model-shift";
+/** Shared-bus channel published by agent-afk-omp. */
+export const AFK_CHANNEL = "afk:changed";
+
+type EvalCtx = ExtensionContext;
 
 export interface RuleConfig {
 	name?: string;
 	when: string;
 	use: string;
 	effort?: string;
+	/** Restore the previous model when `when` turns false again; the rule then re-arms. */
+	revert?: boolean;
 }
 
 export interface ShiftConfig {
@@ -40,6 +46,7 @@ export interface CompiledRule {
 	when: string;
 	use: string;
 	effort?: string;
+	revert: boolean;
 }
 
 /** Values exposed to rule expressions. Integers are BigInt per CEL `int`. */
@@ -52,11 +59,14 @@ export interface RuleVars {
 	elapsed_min: number;
 	model: string;
 	agent: string;
+	afk: boolean;
 }
 
 export interface ShiftState {
 	fired: Set<string>;
 	paused: boolean;
+	/** The revert rule currently in effect and the model to restore. While set, no other rule fires. */
+	applied?: { rule: string; from: string; effort?: string };
 	/** Model this extension last switched to; a different live model means a manual override. */
 	lastProgrammatic?: string;
 }
@@ -70,6 +80,7 @@ export const VARIABLES: ReadonlyArray<[keyof RuleVars, string, string]> = [
 	["elapsed_min", "double", "Minutes since the first session entry"],
 	["model", "string", "Current model as provider/id"],
 	["agent", "string", "Agent kind: main | sub"],
+	["afk", "bool", "AFK mode engaged (agent-afk-omp `afk:changed`)"],
 ];
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".omp", "model-shift.yml");
@@ -110,27 +121,42 @@ export function compileRules(env: Environment, rules: RuleConfig[]): CompiledRul
 		const checked = env.check(rule.when) as { valid: boolean; type?: string; error?: Error };
 		if (!checked.valid) throw new Error(`${label}: ${checked.error?.message.split("\n")[0] ?? "invalid expression"}`);
 		if (checked.type !== "bool") throw new Error(`${label}: 'when' must be bool, got ${checked.type}`);
-		return { name: label, when: rule.when, use: rule.use, effort: rule.effort };
+		return { name: label, when: rule.when, use: rule.use, effort: rule.effort, revert: rule.revert === true };
 	});
 }
 
 export type Decision =
 	| { kind: "none" }
 	| { kind: "switch"; rule: CompiledRule }
+	| { kind: "revert"; rule: string; to: string }
 	| { kind: "error"; rule: CompiledRule; message: string };
 
-/** First not-yet-fired rule whose expression is true. Runtime evaluation errors are reported, never thrown. */
+function evaluateRule(env: Environment, rule: CompiledRule, vars: RuleVars): { ok: true; value: boolean } | { ok: false; message: string } {
+	try {
+		return { ok: true, value: env.evaluate(rule.when, vars as unknown as Record<string, unknown>) === true };
+	} catch (err) {
+		return { ok: false, message: err instanceof Error ? err.message.split("\n")[0] : String(err) };
+	}
+}
+
+/**
+ * While a revert rule is applied, only that rule is considered: when its expression turns false
+ * (or errors, or the rule was removed from config) the previous model is restored. Otherwise the
+ * first not-yet-fired rule whose expression is true switches. Runtime errors are reported, never thrown.
+ */
 export function decide(env: Environment, rules: CompiledRule[], vars: RuleVars, state: ShiftState): Decision {
 	if (state.paused) return { kind: "none" };
+	if (state.applied) {
+		const rule = rules.find(r => r.name === state.applied?.rule);
+		const result = rule ? evaluateRule(env, rule, vars) : { ok: true as const, value: false };
+		if (result.ok && result.value) return { kind: "none" };
+		return { kind: "revert", rule: state.applied.rule, to: state.applied.from };
+	}
 	for (const rule of rules) {
 		if (state.fired.has(rule.name)) continue;
-		let result: unknown;
-		try {
-			result = env.evaluate(rule.when, vars as unknown as Record<string, unknown>);
-		} catch (err) {
-			return { kind: "error", rule, message: err instanceof Error ? err.message.split("\n")[0] : String(err) };
-		}
-		if (result === true) return { kind: "switch", rule };
+		const result = evaluateRule(env, rule, vars);
+		if (!result.ok) return { kind: "error", rule, message: result.message };
+		if (result.value) return { kind: "switch", rule };
 	}
 	return { kind: "none" };
 }
@@ -178,12 +204,23 @@ export function restoreState(entries: readonly unknown[]): ShiftState {
 	for (const e of entries) {
 		if (!isRecord(e) || e.type !== "custom" || e.customType !== ENTRY_TYPE || !isRecord(e.data)) continue;
 		const d = e.data;
-		if ((d.event === "switched" || d.event === "skipped") && typeof d.rule === "string") state.fired.add(d.rule);
-		if (d.event === "switched" && typeof d.to === "string") state.lastProgrammatic = d.to;
+		const rule = typeof d.rule === "string" ? d.rule : undefined;
+		if (d.event === "skipped" && rule) state.fired.add(rule);
+		if (d.event === "switched" && rule) {
+			if (d.revert === true && typeof d.from === "string") {
+				state.applied = { rule, from: d.from, effort: typeof d.previousEffort === "string" ? d.previousEffort : undefined };
+			} else state.fired.add(rule);
+			if (typeof d.to === "string") state.lastProgrammatic = d.to;
+		}
+		if (d.event === "reverted") {
+			state.applied = undefined;
+			if (typeof d.to === "string") state.lastProgrammatic = d.to;
+		}
 		if (d.event === "paused") state.paused = true;
 		if (d.event === "reset") {
 			state.fired.clear();
 			state.paused = false;
+			state.applied = undefined;
 			state.lastProgrammatic = undefined;
 		}
 	}
@@ -206,6 +243,12 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 	let loadError: string | undefined;
 	let state: ShiftState = { fired: new Set(), paused: false };
 	let startedAt = Date.now();
+	/** AFK flag from agent-afk-omp's `afk:changed`; in-memory only, so a resumed session starts not-AFK. */
+	let afk = false;
+	/** Latest handler context; the shared-bus listener has none of its own. */
+	let lastCtx: EvalCtx | undefined;
+	/** Serialises evaluations so an AFK event and an agent_end never switch concurrently. */
+	let chain: Promise<void> = Promise.resolve();
 
 	function log(event: string, details: Record<string, unknown> = {}): void {
 		const path = config?.logPath ?? DEFAULT_LOG_PATH;
@@ -235,7 +278,7 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 		log(String(data.event), data);
 	}
 
-	function collectVars(ctx: Parameters<Parameters<typeof pi.on<"agent_end">>[1]>[1]): RuleVars {
+	function collectVars(ctx: EvalCtx): RuleVars {
 		const sm = (ctx as unknown as SessionCtx).sessionManager;
 		const branch = sm?.getBranch?.() ?? [];
 		const usage = ctx.getContextUsage();
@@ -249,6 +292,7 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 			elapsed_min: (Date.now() - startedAt) / 60_000,
 			model: modelKey(model),
 			agent: ctx.agent?.kind ?? "main",
+			afk,
 		};
 	}
 
@@ -261,12 +305,36 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (_e, ctx) => {
+		lastCtx = ctx;
 		onSession("start", ctx as unknown as SessionCtx);
 		if (loadError) ctx.ui.notify(`[model-shift] Config rejected, engine disabled: ${loadError}`, "error");
 	});
-	pi.on("session_switch", (_e, ctx) => onSession("switch", ctx as unknown as SessionCtx));
+	pi.on("session_switch", (_e, ctx) => {
+		lastCtx = ctx;
+		afk = false;
+		onSession("switch", ctx as unknown as SessionCtx);
+	});
+
+	/** Queue an evaluation; returns when this one has finished. */
+	function schedule(ctx: EvalCtx, trigger: string): Promise<void> {
+		chain = chain.then(() => evaluate(ctx, trigger)).catch(err => log("error", { trigger, message: String(err) }));
+		return chain;
+	}
 
 	pi.on("agent_end", async (_e, ctx) => {
+		lastCtx = ctx;
+		await schedule(ctx, "agent_end");
+	});
+
+	pi.events.on(AFK_CHANNEL, data => {
+		if (!isRecord(data) || typeof data.active !== "boolean") return;
+		afk = data.active;
+		log("afk", { active: afk });
+		// Switch before agent-afk-omp sends its AFK/back prompt, but never mid-turn.
+		if (lastCtx?.isIdle() && typeof data.waitUntil === "function") data.waitUntil(schedule(lastCtx, afk ? "afk-on" : "afk-off"));
+	});
+
+	async function evaluate(ctx: EvalCtx, trigger: string): Promise<void> {
 		if (!config?.enabled || rules.length === 0 || state.paused) return;
 		if (!config.agents.includes(ctx.agent?.kind ?? "main")) return;
 
@@ -281,8 +349,26 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 		const vars = collectVars(ctx);
 		const decision = decide(env, rules, vars, state);
 		if (decision.kind === "none") return;
+		const snapshot = { trigger, cost: Number(vars.cost.toFixed(4)), tokens: Number(vars.tokens), turns: Number(vars.turns), afk };
+
+		if (decision.kind === "revert") {
+			const back = ctx.models.resolve(decision.to);
+			const applied = state.applied;
+			state.applied = undefined;
+			if (!back || !(await pi.setModel(back))) {
+				// Cannot restore: stay put and stop automating, rather than guess another model.
+				state.paused = true;
+				record({ event: "paused", reason: "revert-failed", rule: decision.rule, target: decision.to, ...snapshot });
+				ctx.ui.notify(`[model-shift] Could not restore ${decision.to}; automatic switching paused.`, "warning");
+				return;
+			}
+			if (applied?.effort) pi.setThinkingLevel(applied.effort as Parameters<typeof pi.setThinkingLevel>[0]);
+			state.lastProgrammatic = modelKey(ctx.models.current() ?? back);
+			record({ event: "reverted", rule: decision.rule, from: current, to: state.lastProgrammatic, effort: applied?.effort, ...snapshot });
+			ctx.ui.notify(`[model-shift] Rule '${decision.rule}' no longer holds: ${current} → ${state.lastProgrammatic}. Next prompt starts with a cold cache.`, "info");
+			return;
+		}
 		const { rule } = decision;
-		const snapshot = { cost: Number(vars.cost.toFixed(4)), tokens: Number(vars.tokens), turns: Number(vars.turns) };
 
 		if (decision.kind === "error") {
 			state.fired.add(rule.name);
@@ -310,17 +396,19 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 			return skip("context-too-small", `${to} window (${target.contextWindow}) is below current context (${vars.tokens})`);
 		}
 
+		const previousEffort = pi.getThinkingLevel();
 		const ok = await pi.setModel(target);
 		if (!ok) return skip("no-credentials", `no API key for ${to}`);
 		if (rule.effort) pi.setThinkingLevel(rule.effort as Parameters<typeof pi.setThinkingLevel>[0]);
-		state.fired.add(rule.name);
+		if (rule.revert) state.applied = { rule: rule.name, from: current, effort: rule.effort ? previousEffort : undefined };
+		else state.fired.add(rule.name);
 		state.lastProgrammatic = modelKey(ctx.models.current() ?? target);
-		record({ event: "switched", rule: rule.name, from: current, to: state.lastProgrammatic, effort: rule.effort, ...snapshot });
+		record({ event: "switched", rule: rule.name, from: current, to: state.lastProgrammatic, effort: rule.effort, revert: rule.revert, previousEffort: state.applied?.effort, ...snapshot });
 		ctx.ui.notify(
 			`[model-shift] Rule '${rule.name}' (${rule.when}) matched at $${vars.cost.toFixed(2)}, ${vars.tokens} tokens: ${current} → ${state.lastProgrammatic}${rule.effort ? ` @ ${rule.effort}` : ""}. Next prompt starts with a cold cache.`,
 			"info",
 		);
-	});
+	}
 
 	pi.registerCommand("model-shift", {
 		description: "Show model-shift rules and live variables; `reset` re-arms all rules, `reload` re-reads config",
