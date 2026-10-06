@@ -76,7 +76,7 @@ export default function decayingEffortExtension(pi: ExtensionAPI) {
 	 * resolved levels misreads the judge as a manual override. OMP records the selector
 	 * as `configured` on every `thinking_level_change` session entry; read the latest.
 	 * Falls back to the resolved level when no entry carries `configured`.
-	 * TODO: switch to an official ExtensionAPI accessor once one exists upstream.
+	 * TODO: switch to pi.getConfiguredThinkingLevel() once https://github.com/can1357/oh-my-pi/issues/14562 lands.
 	 */
 	function configuredLevel(ctx?: EntriesCtx): string {
 		const entries = ctx?.sessionManager?.getEntries?.() ?? [];
