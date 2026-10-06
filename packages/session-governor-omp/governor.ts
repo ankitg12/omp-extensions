@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { Environment } from "@marcbachmann/cel-js";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { isRecord } from "./guards.ts";
-import { PROGRESS_DESCRIPTION, PROGRESS_STATUSES, PROGRESS_TOOL, progressReports, progressStats } from "./progress.ts";
+import { progressReports, progressStats } from "../agent-progress-tool-omp/progress.ts";
 import { EPOCH_SHAPE, type ElideShape, emptyStats, type PruneStats, pruneBeforeCut } from "../model-switch-prune-omp/prune.ts";
 
 export const ENTRY_TYPE = "session-governor";
@@ -570,26 +570,6 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		if (config?.debug && key !== lastPruneKey) log("context", lastPrune);
 		lastPruneKey = key;
 		return { messages };
-	});
-
-	// Agent self-report for stuck detection. Counters are derived from these calls in the branch (collectVars).
-	const T = pi.typebox.Type;
-	pi.registerTool({
-		name: PROGRESS_TOOL,
-		label: "Progress",
-		description: PROGRESS_DESCRIPTION,
-		loadMode: "essential",
-		approval: "read",
-		parameters: T.Object({
-			goal: T.String({ description: "The user's current goal, one line; same text while the goal is the same" }),
-			status: T.Enum([...PROGRESS_STATUSES], { description: "progress | blocked | done" }),
-			evidence: T.String({ description: "One raw output line that shows the status" }),
-		}),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const s = progressStats(progressReports((ctx as unknown as SessionCtx).sessionManager?.getBranch?.() ?? []));
-			log("progress", { ...params, blocked_streak: s.blocked_streak, attempts_on_goal: s.attempts_on_goal });
-			return { content: [{ type: "text", text: `recorded: ${params.status}` }] };
-		},
 	});
 
 	pi.registerCommand("governor", {

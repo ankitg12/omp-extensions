@@ -1,12 +1,10 @@
 /**
- * Agent self-reported progress (stuck detection).
+ * Agent self-reported progress sensor. Pure analysis functions and data contracts.
  *
- * The agent calls the `progress` tool once per turn, before its final reply. The governor
- * derives counters from those tool calls in the session branch, so the counters survive
- * resume and follow branch switches without extra persisted state.
+ * The agent calls the `progress` tool once per turn, before its final reply.
+ * Other extensions and analysis tools (session-governor-omp, daylog, agentsview)
+ * read progress entries from the session branch.
  */
-
-import { isRecord } from "./guards.ts";
 
 export const PROGRESS_TOOL = "progress";
 
@@ -44,14 +42,22 @@ const isStatus = (v: unknown): v is ProgressStatus => typeof v === "string" && (
 export function progressReports(branch: readonly unknown[]): ProgressReport[] {
 	const out: ProgressReport[] = [];
 	for (const e of branch) {
-		if (!isRecord(e) || e.type !== "message" || !isRecord(e.message) || e.message.role !== "assistant") continue;
-		const content = e.message.content;
-		if (!Array.isArray(content)) continue;
-		for (const part of content) {
-			if (!isRecord(part) || part.type !== "toolCall" || part.name !== PROGRESS_TOOL || !isRecord(part.arguments)) continue;
-			const a = part.arguments;
-			if (!isStatus(a.status)) continue;
-			out.push({ goal: String(a.goal ?? ""), status: a.status, evidence: String(a.evidence ?? "") });
+		if (typeof e !== "object" || e === null || Array.isArray(e)) continue;
+		const entry = e as Record<string, unknown>;
+		if (entry.type !== "message") continue;
+		const msg = entry.message;
+		if (typeof msg !== "object" || msg === null || Array.isArray(msg)) continue;
+		const message = msg as Record<string, unknown>;
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const part of message.content) {
+			if (typeof part !== "object" || part === null || Array.isArray(part)) continue;
+			const p = part as Record<string, unknown>;
+			if (p.type !== "toolCall" || p.name !== PROGRESS_TOOL) continue;
+			const a = p.arguments;
+			if (typeof a !== "object" || a === null || Array.isArray(a)) continue;
+			const args = a as Record<string, unknown>;
+			if (!isStatus(args.status)) continue;
+			out.push({ goal: String(args.goal ?? ""), status: args.status, evidence: String(args.evidence ?? "") });
 		}
 	}
 	return out;

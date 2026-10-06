@@ -1,0 +1,13 @@
+{
+	"name": "@ankitg12/agent-progress-tool-omp",
+	"version": "0.1.0",
+	"description": "Essential tool for agent self-reported progress; sensors for stuck detection, task tracking, and session analytics",
+	"license": "MIT",
+	"author": "Ankit Gaur",
+	"type": "module",
+	"main": "progress-tool.ts",
+	"keywords": ["pi-package", "pi-extension", "extension", "progress", "sensor", "stuck-detection", "agent"],
+	"pi": {
+		"extensions": ["./progress-tool.ts"]
+	}
+}
