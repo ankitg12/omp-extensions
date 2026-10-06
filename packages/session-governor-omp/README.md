@@ -2,31 +2,37 @@
 
 A single policy engine for session model selection, thinking effort, and wire-level context pruning in [oh-my-pi](https://github.com/can1357/oh-my-pi).
 
-Merges and replaces `@ankitg12/model-shift-omp`, `@ankitg12/model-switch-prune-omp`, and `@ankitg12/decaying-effort-omp`.
+Replaces `@ankitg12/model-shift-omp` and `@ankitg12/decaying-effort-omp`.
 
-## Why one extension?
+## Policy here, mechanism elsewhere
 
-Previously, `model-shift-omp` switched models based on cost or context size, while `model-switch-prune-omp` pruned foreign tool outputs on the wire. When they operated separately:
-1. Model switches and context prunes happened at different turn boundaries, causing **two separate cache misses** (cold prompt reads).
-2. Wire-only pruning does not shrink the saved disk history, so native auto-compaction still calculated context size against the stored estimate and triggered unexpectedly.
+This extension is **policy**: CEL rules decide *when* to switch model, set effort, or prune.
+Pruning the previous model's tool turns after a switch is **mechanism**, not policy: it must happen on
+every switch, whether or not the governor is installed or enabled. That lives in
+[`model-switch-prune-omp`](../model-switch-prune-omp), which also owns the shared pure functions in
+`prune.ts`. The governor imports `pruneBeforeCut` from there for rule-driven epoch cuts.
 
-`session-governor-omp` unifies both actions under a single [CEL](https://cel.dev) rule engine:
+Install both, governor first: OMP chains `context` handlers in load order, and the epoch pass must
+see raw tool results before the switch pass folds foreign ones into user messages.
+
+Why policy-driven pruning is in the governor:
 - If a rule switches the model and prunes at the same turn boundary, you pay for **one cold cache read**, not two.
 - Pruning uses a **latched cut point** (`cutTs`), so earlier tool outputs are elided while maintaining byte-level prefix stability across subsequent requests.
-- Foreign model outputs are automatically pruned on model transitions to avoid cross-provider tool-call formatting errors.
 
 ## Config
 
-The rules file is `~/.omp/governor.yml` (fallback env: `OMP_GOVERNOR_CONFIG`). If missing, default wire-level foreign pruning remains active (`elide` mode).
+The rules file is `~/.omp/governor.yml` (fallback env: `OMP_GOVERNOR_CONFIG`). If missing, the governor is inert.
 
 ```yaml
 enabled: true          # optional, default true
 agents: [main]         # optional; agent kinds to act in (main | sub)
 
-# Global pruning behavior
+# Epoch pruning shape (switch pruning is configured in model-switch-prune-omp)
 prune:
-  foreign: elide       # elide | drop | keep (default: elide)
-  debug: false         # write prune metrics to log when they change
+  minChars: 2000       # elide results longer than this
+  headChars: 600
+  tailChars: 300
+debug: false           # write prune metrics to log when they change
 
 rules:                 # ordered; first matching rule wins
   - name: budget

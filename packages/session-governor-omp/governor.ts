@@ -9,7 +9,9 @@
  * instead of two. Each rule fires at most once per session unless `repeat: true` (prune-only
  * rules). A manual model change after an automatic one pauses the engine for the session.
  * State is persisted as `session-governor` custom entries (legacy `model-shift` entries are
- * still read), so it survives resume. Pruning is wire-only: see prune.ts.
+ * still read), so it survives resume. Pruning is wire-only: see ../model-switch-prune-omp/prune.ts.
+ * Pruning the previous model's turns on a switch is NOT policy and does not live here: it is the
+ * always-on model-switch-prune-omp extension. This file only applies rule-latched epoch cuts.
  *
  * Native compaction triggers on max(billed tokens, stored-history estimate) and runs before the
  * extension `agent_end`. Wire-only pruning lowers only the billed number, so keep the native
@@ -26,7 +28,7 @@ import { Environment } from "@marcbachmann/cel-js";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { isRecord } from "./guards.ts";
 import { PROGRESS_DESCRIPTION, PROGRESS_STATUSES, PROGRESS_TOOL, progressReports, progressStats } from "./progress.ts";
-import { EPOCH_SHAPE, type ElideShape, emptyStats, type ForeignMode, type PruneStats, pruneBeforeCut, pruneForeignHistory } from "./prune.ts";
+import { EPOCH_SHAPE, type ElideShape, emptyStats, type PruneStats, pruneBeforeCut } from "../model-switch-prune-omp/prune.ts";
 
 export const ENTRY_TYPE = "session-governor";
 /** Entry type written by model-shift-omp before the merge; read for resume compatibility. */
@@ -55,8 +57,6 @@ export interface ShiftConfig {
 	agents: string[];
 	rules: RuleConfig[];
 	logPath: string;
-	/** Automatic pruning of the previous model's tool turns. Default: elide. */
-	foreign: ForeignMode;
 	epochShape: ElideShape;
 	/** Log per-request prune stats when they change. */
 	debug: boolean;
@@ -154,8 +154,9 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 	const obj = raw as Record<string, unknown>;
 	if (!Array.isArray(obj.rules)) throw new Error(`${path}: 'rules' must be a list`);
 	const prune = (obj.prune && typeof obj.prune === "object" ? obj.prune : {}) as Record<string, unknown>;
-	const foreign = prune.foreign ?? "elide";
-	if (foreign !== "elide" && foreign !== "drop" && foreign !== "keep") throw new Error(`${path}: prune.foreign must be elide|drop|keep`);
+	if (prune.foreign !== undefined) {
+		throw new Error(`${path}: prune.foreign moved to model-switch-prune-omp (~/.omp/agent/model-switch-prune.json "mode"); remove it here`);
+	}
 	const epochShape = { ...EPOCH_SHAPE };
 	for (const key of ["minChars", "headChars", "tailChars"] as const) {
 		const v = prune[key];
@@ -171,7 +172,6 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 		agents: Array.isArray(obj.agents) ? obj.agents.map(String) : ["main"],
 		rules: obj.rules as RuleConfig[],
 		logPath: typeof obj.logPath === "string" ? obj.logPath : DEFAULT_LOG_PATH,
-		foreign,
 		epochShape,
 		debug: obj.debug === true,
 	};
@@ -559,13 +559,11 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		if (rule.prune) latchCut();
 	}
 
-	// Wire-only pruning. Runs in every agent kind; with no config file, foreign pruning stays on (elide).
+	// Wire-only epoch pruning: only after a rule latched a cut. Runs in every agent kind.
 	pi.on("context", (event, ctx) => {
-		if (config && !config.enabled) return;
+		if (!state.cut || (config && !config.enabled)) return;
 		const stats = emptyStats();
-		let messages = event.messages;
-		if (state.cut) messages = pruneBeforeCut(messages, state.cut.cutTs, config?.epochShape, stats);
-		if (ctx.model) messages = pruneForeignHistory(messages, ctx.model, config?.foreign ?? "elide", stats);
+		const messages = pruneBeforeCut(event.messages, state.cut.cutTs, config?.epochShape, stats);
 		if (messages === event.messages) return;
 		lastPrune = { ...stats, model: modelKey(ctx.model) };
 		const key = JSON.stringify(lastPrune);
@@ -613,9 +611,9 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 			const lines = [
 				`governor: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? `armed; model rules paused (manual /model)${state.effortPaused ? ", effort rules paused (manual effort)" : ""}` : state.effortPaused ? "armed; effort rules paused (manual effort)" : "armed"}`,
 				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune} blocked_streak=${vars.blocked_streak} attempts_on_goal=${vars.attempts_on_goal}`,
-				`prune: foreign=${config?.foreign ?? "elide"} cut=${state.cut ? `${new Date(state.cut.cutTs).toISOString()} (rule ${state.cut.rule})` : "none"}`,
+				`prune: cut=${state.cut ? `${new Date(state.cut.cutTs).toISOString()} (rule ${state.cut.rule})` : "none"}`,
 				lastPrune
-					? `last pruned request (${lastPrune.model}): ${lastPrune.charsBefore - lastPrune.charsAfter} chars saved (~${Math.round((lastPrune.charsBefore - lastPrune.charsAfter) / 4)} tokens est.), foreign elided=${lastPrune.elided} dropped=${lastPrune.dropped} kept=${lastPrune.kept}, epoch elided=${lastPrune.epochElided}`
+					? `last pruned request (${lastPrune.model}): ${lastPrune.charsBefore - lastPrune.charsAfter} chars saved (~${Math.round((lastPrune.charsBefore - lastPrune.charsAfter) / 4)} tokens est.), epoch elided=${lastPrune.epochElided} (model-switch pruning: model-switch-prune-omp)`
 					: "last pruned request: none this process",
 				...rules.map(r => {
 					let now = "?";

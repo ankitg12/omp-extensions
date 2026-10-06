@@ -1,6 +1,7 @@
 /**
- * Wire-only context pruning for session-governor-omp. Pure functions; the governor applies them
- * at the `context` hook. The persisted session file is never changed.
+ * Wire-only context pruning. Pure functions applied at the `context` hook; the persisted session
+ * file is never changed. Pass 1 is applied by model-switch-prune.ts (always on); pass 2 by
+ * session-governor-omp, which imports this file.
  *
  * Two independent passes, both cache-stable by construction:
  *
@@ -10,7 +11,7 @@
  *    foreign results stay whole. Foreignness depends on provenance, not position, so the pruned
  *    prefix is identical on every request after a switch (only the first one is cache-cold).
  *
- * 2. Epoch pruning (rule-driven, `prune: true`). When a rule fires, the governor latches a cut
+ * 2. Epoch pruning (governor rule, `prune: true`). When a rule fires, the governor latches a cut
  *    timestamp. Every tool result older than the cut is elided. The cut changes only when a rule
  *    fires again, so the request prefix stays byte-identical between firings. A cut that moved
  *    every turn would make every request cache-cold and cost more than it saves.

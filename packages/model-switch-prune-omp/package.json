@@ -1,0 +1,17 @@
+{
+	"name": "@ankitg12/model-switch-prune-omp",
+	"version": "0.2.0",
+	"description": "Always-on execution layer: after a model switch, prunes tool turns written by the previous model on the wire",
+	"license": "MIT",
+	"author": "Ankit Gaur",
+	"type": "module",
+	"main": "model-switch-prune.ts",
+	"exports": {
+		".": "./model-switch-prune.ts",
+		"./prune": "./prune.ts"
+	},
+	"keywords": ["pi-package", "pi-extension", "extension", "model", "context", "tokens", "prune"],
+	"pi": {
+		"extensions": ["./model-switch-prune.ts"]
+	}
+}
