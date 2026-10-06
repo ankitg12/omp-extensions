@@ -93,6 +93,28 @@ export interface ShiftState {
 	lastProgrammatic?: string;
 	/** Latched epoch cut; tool results older than `cutTs` are elided on the wire. */
 	cut?: { rule: string; cutTs: number };
+	/** Effort selector this extension last set; a different live selector means a manual override. */
+	lastEffort?: string;
+	/** A manual effort change pauses effort-only rules; model and prune rules keep running. */
+	effortPaused?: boolean;
+}
+
+/** True for a rule whose only action is setting effort (the decaying-effort schedule). */
+export const isEffortOnly = (r: { use?: string; prune: boolean; effort?: string }): boolean =>
+	r.use === undefined && !r.prune && r.effort !== undefined;
+
+/**
+ * The effort the user (or this extension) *selected*, not the level OMP resolved it to.
+ * With `auto`, OMP re-resolves the level per prompt, so the resolved level is not stable.
+ * OMP records the selector as `configured` on each `thinking_level_change` entry.
+ */
+export function configuredEffort(entries: readonly unknown[]): string | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i];
+		if (!isRecord(e) || e.type !== "thinking_level_change") continue;
+		return typeof e.configured === "string" ? e.configured : undefined;
+	}
+	return undefined;
 }
 
 export const VARIABLES: ReadonlyArray<[keyof RuleVars, string, string]> = [
@@ -157,9 +179,10 @@ export function compileRules(env: Environment, rules: RuleConfig[]): CompiledRul
 		if (!rule || typeof rule.when !== "string") throw new Error(`${label}: 'when' must be a string`);
 		if (rule.use !== undefined && typeof rule.use !== "string") throw new Error(`${label}: 'use' must be a string`);
 		const prune = rule.prune === true;
-		if (rule.use === undefined && !prune) throw new Error(`${label}: needs 'use' (switch model) or 'prune: true'`);
-		if (rule.use === undefined && (rule.effort !== undefined || rule.revert)) throw new Error(`${label}: 'effort' and 'revert' need 'use'`);
-		if (rule.repeat && rule.use !== undefined) throw new Error(`${label}: 'repeat' applies to prune-only rules`);
+		if (rule.effort !== undefined && typeof rule.effort !== "string") throw new Error(`${label}: 'effort' must be a string`);
+		if (rule.use === undefined && !prune && rule.effort === undefined) throw new Error(`${label}: needs 'use', 'effort', or 'prune: true'`);
+		if (rule.use === undefined && rule.revert) throw new Error(`${label}: 'revert' needs 'use'`);
+		if (rule.repeat && (rule.use !== undefined || rule.effort !== undefined)) throw new Error(`${label}: 'repeat' applies to prune-only rules`);
 		if (rule.revert && prune) throw new Error(`${label}: 'revert' and 'prune' cannot be combined`);
 		if (names.has(label)) throw new Error(`${label}: duplicate rule name`);
 		names.add(label);
@@ -199,6 +222,7 @@ export function decide(env: Environment, rules: CompiledRule[], vars: RuleVars, 
 	}
 	for (const rule of rules) {
 		if (state.fired.has(rule.name)) continue;
+		if (state.effortPaused && isEffortOnly(rule)) continue;
 		const result = evaluateRule(env, rule, vars);
 		if (!result.ok) return { kind: "error", rule, message: result.message };
 		if (result.value) return { kind: "switch", rule };
@@ -266,7 +290,13 @@ export function restoreState(entries: readonly unknown[]): ShiftState {
 				state.applied = { rule, from: d.from, effort: typeof d.previousEffort === "string" ? d.previousEffort : undefined };
 			} else state.fired.add(rule);
 			if (typeof d.to === "string") state.lastProgrammatic = d.to;
+			if (typeof d.effortSet === "string") state.lastEffort = d.effortSet;
 		}
+		if (d.event === "effort" && rule) {
+			state.fired.add(rule);
+			if (typeof d.effortSet === "string") state.lastEffort = d.effortSet;
+		}
+		if (d.event === "effort-paused") state.effortPaused = true;
 		if (d.event === "pruned" && rule && typeof d.cutTs === "number") {
 			state.cut = { rule, cutTs: d.cutTs };
 			if (d.repeat !== true) state.fired.add(rule);
@@ -282,6 +312,8 @@ export function restoreState(entries: readonly unknown[]): ShiftState {
 			state.paused = false;
 			state.applied = undefined;
 			state.lastProgrammatic = undefined;
+			state.lastEffort = undefined;
+			state.effortPaused = false;
 		}
 	}
 	return state;
@@ -411,6 +443,12 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 			ctx.ui.notify(`[governor] Manual model change to ${current} detected; automatic switching paused for this session.`, "info");
 			return;
 		}
+		const effortNow = (): string => configuredEffort((ctx as unknown as SessionCtx).sessionManager?.getEntries?.() ?? []) ?? String(pi.getThinkingLevel() ?? "inherit");
+		if (state.lastEffort && !state.effortPaused && effortNow() !== state.lastEffort) {
+			state.effortPaused = true;
+			record({ event: "effort-paused", expected: state.lastEffort, current: effortNow() });
+			ctx.ui.notify(`[governor] Manual effort change to ${effortNow()} detected; effort-only rules paused for this session.`, "info");
+		}
 
 		const vars = collectVars(ctx);
 		const decision = decide(env, rules, vars, state);
@@ -429,9 +467,12 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(`[governor] Could not restore ${decision.to}; automatic switching paused.`, "warning");
 				return;
 			}
-			if (applied?.effort) pi.setThinkingLevel(applied.effort as Parameters<typeof pi.setThinkingLevel>[0]);
+			if (applied?.effort) {
+				pi.setThinkingLevel(applied.effort as Parameters<typeof pi.setThinkingLevel>[0]);
+				state.lastEffort = effortNow();
+			}
 			state.lastProgrammatic = modelKey(ctx.models.current() ?? back);
-			record({ event: "reverted", rule: decision.rule, from: current, to: state.lastProgrammatic, effort: applied?.effort, ...snapshot });
+			record({ event: "reverted", rule: decision.rule, from: current, to: state.lastProgrammatic, effort: applied?.effort, effortSet: applied?.effort ? state.lastEffort : undefined, ...snapshot });
 			ctx.ui.notify(`[governor] Rule '${decision.rule}' no longer holds: ${current} → ${state.lastProgrammatic}. Next prompt starts with a cold cache.`, "info");
 			return;
 		}
@@ -467,7 +508,18 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 				"info",
 			);
 		};
-		if (rule.use === undefined) return latchCut();
+		if (rule.use === undefined) {
+			if (rule.effort && !state.effortPaused) {
+				pi.setThinkingLevel(rule.effort as Parameters<typeof pi.setThinkingLevel>[0]);
+				state.lastEffort = effortNow();
+				if (!rule.prune) state.fired.add(rule.name);
+				record({ event: "effort", rule: rule.name, effort: rule.effort, effortSet: state.lastEffort, ...snapshot });
+				const clamped = state.lastEffort !== rule.effort ? ` (clamped to ${state.lastEffort})` : "";
+				ctx.ui.notify(`[governor] Rule '${rule.name}' (${rule.when}): effort → ${rule.effort}${clamped}.`, "info");
+			} else if (!rule.prune) state.fired.add(rule.name);
+			if (rule.prune) latchCut();
+			return;
+		}
 
 		const target = ctx.models.resolve(rule.use);
 		if (!target) return skip("unresolved", `'${rule.use}' does not resolve to an available model`);
@@ -485,11 +537,14 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		const previousEffort = pi.getThinkingLevel();
 		const ok = await pi.setModel(target);
 		if (!ok) return skip("no-credentials", `no API key for ${to}`);
-		if (rule.effort) pi.setThinkingLevel(rule.effort as Parameters<typeof pi.setThinkingLevel>[0]);
+		if (rule.effort) {
+			pi.setThinkingLevel(rule.effort as Parameters<typeof pi.setThinkingLevel>[0]);
+			state.lastEffort = effortNow();
+		}
 		if (rule.revert) state.applied = { rule: rule.name, from: current, effort: rule.effort ? previousEffort : undefined };
 		else state.fired.add(rule.name);
 		state.lastProgrammatic = modelKey(ctx.models.current() ?? target);
-		record({ event: "switched", rule: rule.name, from: current, to: state.lastProgrammatic, effort: rule.effort, revert: rule.revert, previousEffort: state.applied?.effort, ...snapshot });
+		record({ event: "switched", rule: rule.name, from: current, to: state.lastProgrammatic, effort: rule.effort, effortSet: rule.effort ? state.lastEffort : undefined, revert: rule.revert, previousEffort: state.applied?.effort, ...snapshot });
 		ctx.ui.notify(
 			`[governor] Rule '${rule.name}' (${rule.when}) matched at $${vars.cost.toFixed(2)}, ${vars.tokens} tokens: ${current} → ${state.lastProgrammatic}${rule.effort ? ` @ ${rule.effort}` : ""}. Next prompt starts with a cold cache.`,
 			"info",
@@ -523,7 +578,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (sub === "reset") {
-				state = { fired: new Set(), paused: false, cut: state.cut };
+				state = { fired: new Set(), paused: false, cut: state.cut, effortPaused: false };
 				record({ event: "reset" });
 				ctx.ui.notify("[governor] All rules re-armed; pause cleared (the epoch cut stays).", "info");
 				return;
@@ -543,7 +598,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 					} catch (err) {
 						now = `error: ${err instanceof Error ? err.message.split("\n")[0] : err}`;
 					}
-					return `  ${state.fired.has(r.name) ? "✓ fired" : "· armed"}  ${r.name}: when ${r.when} → ${r.use}${r.effort ? ` @ ${r.effort}` : ""}  [now: ${now}]`;
+					return `  ${state.fired.has(r.name) ? "✓ fired" : "· armed"}  ${r.name}: when ${r.when} → ${r.use ?? (r.prune ? "prune" : "effort")}${r.effort ? ` @ ${r.effort}` : ""}  [now: ${now}]`;
 				}),
 			];
 			ctx.ui.notify(lines.join("\n"), "info");

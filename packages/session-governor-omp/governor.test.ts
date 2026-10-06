@@ -6,6 +6,7 @@ import {
 	branchCost,
 	branchTurns,
 	compileRules,
+	configuredEffort,
 	createEnvironment,
 	decide,
 	ENTRY_TYPE,
@@ -42,7 +43,12 @@ describe("compileRules", () => {
 		expect(() => compileRules(env, [{ when: "cost", use: "x" }])).toThrow(/must be bool, got double/);
 	});
 	test("requires at least one of use or prune", () => {
-		expect(() => compileRules(env, [{ when: "true" } as never])).toThrow(/needs 'use' .* or 'prune: true'/);
+		expect(() => compileRules(env, [{ when: "true" } as never])).toThrow(/needs 'use', 'effort', or 'prune: true'/);
+	});
+	test("accepts effort-only rule; rejects revert or repeat on it", () => {
+		expect(compileRules(env, [{ when: "turns >= 1", effort: "high" }])).toHaveLength(1);
+		expect(() => compileRules(env, [{ when: "afk", effort: "low", revert: true }])).toThrow(/'revert' needs 'use'/);
+		expect(() => compileRules(env, [{ when: "true", effort: "low", repeat: true }])).toThrow(/repeat/);
 	});
 	test("accepts prune-only rule", () => {
 		expect(compileRules(env, [{ when: "tokens > 100000", prune: true }])).toHaveLength(1);
@@ -76,6 +82,42 @@ describe("decide", () => {
 	test("runtime error is reported, not thrown", () => {
 		const r = compileRules(env, [{ name: "div", when: "1 / (turns - turns) > 0", use: "x" }]);
 		expect(decide(env, r, vars(), fresh()).kind).toBe("error");
+	});
+});
+
+describe("effort schedule (decaying-effort port)", () => {
+	const rules = compileRules(env, [
+		{ name: "e1", when: "turns >= 1", effort: "xhigh" },
+		{ name: "e2", when: "turns >= 2", effort: "high" },
+		{ name: "budget", when: "cost > 1", use: "sonnet" },
+	]);
+	test("steps one level per evaluation in rule order", () => {
+		const s = fresh();
+		const d1 = decide(env, rules, vars({ turns: 2n }), s);
+		expect(d1.kind === "switch" && d1.rule.name).toBe("e1");
+		s.fired.add("e1");
+		const d2 = decide(env, rules, vars({ turns: 2n }), s);
+		expect(d2.kind === "switch" && d2.rule.name).toBe("e2");
+	});
+	test("effortPaused skips effort-only rules but not model rules", () => {
+		const s = { ...fresh(), effortPaused: true };
+		const d = decide(env, rules, vars({ turns: 2n, cost: 2 }), s);
+		expect(d.kind === "switch" && d.rule.name).toBe("budget");
+	});
+	test("restoreState replays effort, effort-paused, reset", () => {
+		const e = (data: object) => ({ type: "custom", customType: ENTRY_TYPE, data });
+		const s = restoreState([e({ event: "effort", rule: "e1", effort: "xhigh", effortSet: "high" }), e({ event: "effort-paused" })]);
+		expect(s.fired.has("e1")).toBe(true);
+		expect(s.lastEffort).toBe("high");
+		expect(s.effortPaused).toBe(true);
+		const r = restoreState([e({ event: "effort", rule: "e1", effortSet: "high" }), e({ event: "reset" })]);
+		expect(r.effortPaused).toBe(false);
+		expect(r.lastEffort).toBeUndefined();
+	});
+	test("configuredEffort reads the latest thinking_level_change selector", () => {
+		expect(configuredEffort([{ type: "thinking_level_change", configured: "auto" }, { type: "message" }])).toBe("auto");
+		expect(configuredEffort([{ type: "thinking_level_change" }])).toBeUndefined();
+		expect(configuredEffort([])).toBeUndefined();
 	});
 });
 
