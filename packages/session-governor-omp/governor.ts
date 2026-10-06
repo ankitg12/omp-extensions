@@ -1,12 +1,19 @@
 /**
- * model-shift-omp — switch the session model when a CEL rule matches.
+ * session-governor-omp — one CEL policy engine for the session: switch model, set effort, and
+ * prune context. OMP owns the mechanisms (setModel, the `context` hook); this file owns policy.
  *
- * Rules live in `~/.omp/model-shift.yml` (override: OMP_MODEL_SHIFT_CONFIG). No file → inert.
- * Rules are evaluated in order at `agent_end` (between prompts, the moment a user would type
- * `/model`); the first matching, not-yet-fired rule switches the model. Each rule fires at most
- * once per session (one-way ratchet). A manual model change after an automatic one pauses the
- * engine for the rest of the session. Fired/paused state is persisted as `model-shift` custom
- * session entries, so it survives resume.
+ * Rules live in `~/.omp/governor.yml` (override: OMP_GOVERNOR_CONFIG). Rules are evaluated in
+ * order at `agent_end` (between prompts, the moment a user would type `/model`); the first
+ * matching, not-yet-fired rule acts. A rule may switch the model (`use`), latch a new epoch cut
+ * for context pruning (`prune: true`), or both — doing both at one boundary costs one cold cache
+ * instead of two. Each rule fires at most once per session unless `repeat: true` (prune-only
+ * rules). A manual model change after an automatic one pauses the engine for the session.
+ * State is persisted as `session-governor` custom entries (legacy `model-shift` entries are
+ * still read), so it survives resume. Pruning is wire-only: see prune.ts.
+ *
+ * Native compaction triggers on max(billed tokens, stored-history estimate) and runs before the
+ * extension `agent_end`. Wire-only pruning lowers only the billed number, so keep the native
+ * `compaction.thresholdTokens` above the governor's prune thresholds (a safety net only).
  *
  * Why `agent_end` and not `before_agent_start`: a model change refreshes the model-specific base
  * system prompt (session-tools.ts `syncAfterModelChange`), while `before_agent_start` runs after
@@ -17,8 +24,11 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Environment } from "@marcbachmann/cel-js";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { EPOCH_SHAPE, type ElideShape, emptyStats, type ForeignMode, type PruneStats, pruneBeforeCut, pruneForeignHistory } from "./prune.ts";
 
-export const ENTRY_TYPE = "model-shift";
+export const ENTRY_TYPE = "session-governor";
+/** Entry type written by model-shift-omp before the merge; read for resume compatibility. */
+export const LEGACY_ENTRY_TYPE = "model-shift";
 /** Shared-bus channel published by agent-afk-omp. */
 export const AFK_CHANNEL = "afk:changed";
 
@@ -27,10 +37,14 @@ type EvalCtx = ExtensionContext;
 export interface RuleConfig {
 	name?: string;
 	when: string;
-	use: string;
+	use?: string;
 	effort?: string;
 	/** Restore the previous model when `when` turns false again; the rule then re-arms. */
 	revert?: boolean;
+	/** Latch a new epoch cut: elide tool results older than the current exchange. */
+	prune?: boolean;
+	/** Prune-only rules: stay armed after firing. Guard with `turns_since_prune` to avoid cache thrash. */
+	repeat?: boolean;
 }
 
 export interface ShiftConfig {
@@ -39,14 +53,21 @@ export interface ShiftConfig {
 	agents: string[];
 	rules: RuleConfig[];
 	logPath: string;
+	/** Automatic pruning of the previous model's tool turns. Default: elide. */
+	foreign: ForeignMode;
+	epochShape: ElideShape;
+	/** Log per-request prune stats when they change. */
+	debug: boolean;
 }
 
 export interface CompiledRule {
 	name: string;
 	when: string;
-	use: string;
+	use?: string;
 	effort?: string;
 	revert: boolean;
+	prune: boolean;
+	repeat: boolean;
 }
 
 /** Values exposed to rule expressions. Integers are BigInt per CEL `int`. */
@@ -60,6 +81,7 @@ export interface RuleVars {
 	model: string;
 	agent: string;
 	afk: boolean;
+	turns_since_prune: bigint;
 }
 
 export interface ShiftState {
@@ -69,6 +91,8 @@ export interface ShiftState {
 	applied?: { rule: string; from: string; effort?: string };
 	/** Model this extension last switched to; a different live model means a manual override. */
 	lastProgrammatic?: string;
+	/** Latched epoch cut; tool results older than `cutTs` are elided on the wire. */
+	cut?: { rule: string; cutTs: number };
 }
 
 export const VARIABLES: ReadonlyArray<[keyof RuleVars, string, string]> = [
@@ -81,10 +105,11 @@ export const VARIABLES: ReadonlyArray<[keyof RuleVars, string, string]> = [
 	["model", "string", "Current model as provider/id"],
 	["agent", "string", "Agent kind: main | sub"],
 	["afk", "bool", "AFK mode engaged (agent-afk-omp `afk:changed`)"],
+	["turns_since_prune", "int", "User prompts since the last epoch cut (all prompts if none)"],
 ];
 
-const DEFAULT_CONFIG_PATH = join(homedir(), ".omp", "model-shift.yml");
-const DEFAULT_LOG_PATH = join(homedir(), ".omp", "logs", "model-shift.jsonl");
+const DEFAULT_CONFIG_PATH = join(homedir(), ".omp", "governor.yml");
+const DEFAULT_LOG_PATH = join(homedir(), ".omp", "logs", "governor.jsonl");
 
 export function createEnvironment(): Environment {
 	let env = new Environment();
@@ -100,11 +125,27 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 	if (!raw || typeof raw !== "object") throw new Error(`${path}: expected a mapping at top level`);
 	const obj = raw as Record<string, unknown>;
 	if (!Array.isArray(obj.rules)) throw new Error(`${path}: 'rules' must be a list`);
+	const prune = (obj.prune && typeof obj.prune === "object" ? obj.prune : {}) as Record<string, unknown>;
+	const foreign = prune.foreign ?? "elide";
+	if (foreign !== "elide" && foreign !== "drop" && foreign !== "keep") throw new Error(`${path}: prune.foreign must be elide|drop|keep`);
+	const epochShape = { ...EPOCH_SHAPE };
+	for (const key of ["minChars", "headChars", "tailChars"] as const) {
+		const v = prune[key];
+		if (v === undefined) continue;
+		if (typeof v !== "number" || !Number.isInteger(v) || v < 0) throw new Error(`${path}: prune.${key} must be a non-negative integer`);
+		epochShape[key] = v;
+	}
+	if (epochShape.headChars + epochShape.tailChars >= epochShape.minChars) {
+		throw new Error(`${path}: prune.headChars + prune.tailChars must be below prune.minChars, or nothing is saved`);
+	}
 	return {
 		enabled: obj.enabled !== false,
 		agents: Array.isArray(obj.agents) ? obj.agents.map(String) : ["main"],
 		rules: obj.rules as RuleConfig[],
 		logPath: typeof obj.logPath === "string" ? obj.logPath : DEFAULT_LOG_PATH,
+		foreign,
+		epochShape,
+		debug: obj.debug === true,
 	};
 }
 
@@ -113,15 +154,19 @@ export function compileRules(env: Environment, rules: RuleConfig[]): CompiledRul
 	const names = new Set<string>();
 	return rules.map((rule, i) => {
 		const label = rule?.name ?? `rule[${i}]`;
-		if (!rule || typeof rule.when !== "string" || typeof rule.use !== "string") {
-			throw new Error(`${label}: 'when' and 'use' must be strings`);
-		}
+		if (!rule || typeof rule.when !== "string") throw new Error(`${label}: 'when' must be a string`);
+		if (rule.use !== undefined && typeof rule.use !== "string") throw new Error(`${label}: 'use' must be a string`);
+		const prune = rule.prune === true;
+		if (rule.use === undefined && !prune) throw new Error(`${label}: needs 'use' (switch model) or 'prune: true'`);
+		if (rule.use === undefined && (rule.effort !== undefined || rule.revert)) throw new Error(`${label}: 'effort' and 'revert' need 'use'`);
+		if (rule.repeat && rule.use !== undefined) throw new Error(`${label}: 'repeat' applies to prune-only rules`);
+		if (rule.revert && prune) throw new Error(`${label}: 'revert' and 'prune' cannot be combined`);
 		if (names.has(label)) throw new Error(`${label}: duplicate rule name`);
 		names.add(label);
 		const checked = env.check(rule.when) as { valid: boolean; type?: string; error?: Error };
 		if (!checked.valid) throw new Error(`${label}: ${checked.error?.message.split("\n")[0] ?? "invalid expression"}`);
 		if (checked.type !== "bool") throw new Error(`${label}: 'when' must be bool, got ${checked.type}`);
-		return { name: label, when: rule.when, use: rule.use, effort: rule.effort, revert: rule.revert === true };
+		return { name: label, when: rule.when, use: rule.use, effort: rule.effort, revert: rule.revert === true, prune, repeat: rule.repeat === true };
 	});
 }
 
@@ -185,8 +230,18 @@ export function branchCost(branch: readonly unknown[]): number {
 	return spent;
 }
 
+/** Timestamps of user prompts in branch order. */
+export function userTimestamps(branch: readonly unknown[]): number[] {
+	const out: number[] = [];
+	for (const e of branch) {
+		if (!isRecord(e) || e.type !== "message" || !isRecord(e.message) || e.message.role !== "user") continue;
+		out.push(typeof e.message.timestamp === "number" ? e.message.timestamp : Number.NaN);
+	}
+	return out;
+}
+
 export function branchTurns(branch: readonly unknown[]): number {
-	return branch.filter(e => isRecord(e) && e.type === "message" && isRecord(e.message) && e.message.role === "user").length;
+	return userTimestamps(branch).length;
 }
 
 export function firstTimestamp(entries: readonly unknown[]): number | undefined {
@@ -198,11 +253,11 @@ export function firstTimestamp(entries: readonly unknown[]): number | undefined 
 	return undefined;
 }
 
-/** Rebuild fired/paused state from persisted `model-shift` custom entries (resume support). */
+/** Rebuild fired/paused/cut state from persisted governor (and legacy model-shift) entries (resume support). */
 export function restoreState(entries: readonly unknown[]): ShiftState {
 	const state: ShiftState = { fired: new Set(), paused: false };
 	for (const e of entries) {
-		if (!isRecord(e) || e.type !== "custom" || e.customType !== ENTRY_TYPE || !isRecord(e.data)) continue;
+		if (!isRecord(e) || e.type !== "custom" || (e.customType !== ENTRY_TYPE && e.customType !== LEGACY_ENTRY_TYPE) || !isRecord(e.data)) continue;
 		const d = e.data;
 		const rule = typeof d.rule === "string" ? d.rule : undefined;
 		if (d.event === "skipped" && rule) state.fired.add(rule);
@@ -212,11 +267,16 @@ export function restoreState(entries: readonly unknown[]): ShiftState {
 			} else state.fired.add(rule);
 			if (typeof d.to === "string") state.lastProgrammatic = d.to;
 		}
+		if (d.event === "pruned" && rule && typeof d.cutTs === "number") {
+			state.cut = { rule, cutTs: d.cutTs };
+			if (d.repeat !== true) state.fired.add(rule);
+		}
 		if (d.event === "reverted") {
 			state.applied = undefined;
 			if (typeof d.to === "string") state.lastProgrammatic = d.to;
 		}
 		if (d.event === "paused") state.paused = true;
+		// `reset` re-arms rules; the latched cut stays, because un-pruning would also cost a cold cache.
 		if (d.event === "reset") {
 			state.fired.clear();
 			state.paused = false;
@@ -235,8 +295,8 @@ interface SessionCtx {
 	sessionManager?: { getEntries?: () => readonly unknown[]; getBranch?: () => readonly unknown[] };
 }
 
-export default function modelShiftExtension(pi: ExtensionAPI) {
-	const configPath = process.env.OMP_MODEL_SHIFT_CONFIG ?? DEFAULT_CONFIG_PATH;
+export default function sessionGovernorExtension(pi: ExtensionAPI) {
+	const configPath = process.env.OMP_GOVERNOR_CONFIG ?? DEFAULT_CONFIG_PATH;
 	const env = createEnvironment();
 	let config: ShiftConfig | undefined;
 	let rules: CompiledRule[] = [];
@@ -249,9 +309,12 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 	let lastCtx: EvalCtx | undefined;
 	/** Serialises evaluations so an AFK event and an agent_end never switch concurrently. */
 	let chain: Promise<void> = Promise.resolve();
+	/** Stats of the most recent pruned request, for `/governor` and change-only debug logging. */
+	let lastPrune: (PruneStats & { model: string }) | undefined;
+	let lastPruneKey = "";
 
 	function log(event: string, details: Record<string, unknown> = {}): void {
-		const path = config?.logPath ?? DEFAULT_LOG_PATH;
+		const path = process.env.OMP_GOVERNOR_LOG ?? config?.logPath ?? DEFAULT_LOG_PATH;
 		try {
 			mkdirSync(dirname(path), { recursive: true });
 			appendFileSync(path, `${JSON.stringify({ ts: new Date().toISOString(), event, ...details })}\n`);
@@ -283,7 +346,10 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 		const branch = sm?.getBranch?.() ?? [];
 		const usage = ctx.getContextUsage();
 		const model = ctx.model;
+		const prompts = userTimestamps(branch);
+		const cutTs = state.cut?.cutTs;
 		return {
+			turns_since_prune: BigInt(cutTs === undefined ? prompts.length : prompts.filter(t => t > cutTs).length),
 			cost: branchCost(branch),
 			tokens: BigInt(Math.round(usage?.tokens ?? 0)),
 			context_window: BigInt(Math.round(usage?.contextWindow ?? model?.contextWindow ?? 0)),
@@ -307,7 +373,7 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
 		onSession("start", ctx as unknown as SessionCtx);
-		if (loadError) ctx.ui.notify(`[model-shift] Config rejected, engine disabled: ${loadError}`, "error");
+		if (loadError) ctx.ui.notify(`[governor] Config rejected, engine disabled: ${loadError}`, "error");
 	});
 	pi.on("session_switch", (_e, ctx) => {
 		lastCtx = ctx;
@@ -342,7 +408,7 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 		if (state.lastProgrammatic && current !== state.lastProgrammatic) {
 			state.paused = true;
 			record({ event: "paused", expected: state.lastProgrammatic, current });
-			ctx.ui.notify(`[model-shift] Manual model change to ${current} detected; automatic switching paused for this session.`, "info");
+			ctx.ui.notify(`[governor] Manual model change to ${current} detected; automatic switching paused for this session.`, "info");
 			return;
 		}
 
@@ -350,6 +416,7 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 		const decision = decide(env, rules, vars, state);
 		if (decision.kind === "none") return;
 		const snapshot = { trigger, cost: Number(vars.cost.toFixed(4)), tokens: Number(vars.tokens), turns: Number(vars.turns), afk };
+		const sessionBranch = (ctx as unknown as SessionCtx).sessionManager?.getBranch?.() ?? [];
 
 		if (decision.kind === "revert") {
 			const back = ctx.models.resolve(decision.to);
@@ -359,13 +426,13 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 				// Cannot restore: stay put and stop automating, rather than guess another model.
 				state.paused = true;
 				record({ event: "paused", reason: "revert-failed", rule: decision.rule, target: decision.to, ...snapshot });
-				ctx.ui.notify(`[model-shift] Could not restore ${decision.to}; automatic switching paused.`, "warning");
+				ctx.ui.notify(`[governor] Could not restore ${decision.to}; automatic switching paused.`, "warning");
 				return;
 			}
 			if (applied?.effort) pi.setThinkingLevel(applied.effort as Parameters<typeof pi.setThinkingLevel>[0]);
 			state.lastProgrammatic = modelKey(ctx.models.current() ?? back);
 			record({ event: "reverted", rule: decision.rule, from: current, to: state.lastProgrammatic, effort: applied?.effort, ...snapshot });
-			ctx.ui.notify(`[model-shift] Rule '${decision.rule}' no longer holds: ${current} → ${state.lastProgrammatic}. Next prompt starts with a cold cache.`, "info");
+			ctx.ui.notify(`[governor] Rule '${decision.rule}' no longer holds: ${current} → ${state.lastProgrammatic}. Next prompt starts with a cold cache.`, "info");
 			return;
 		}
 		const { rule } = decision;
@@ -373,15 +440,34 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 		if (decision.kind === "error") {
 			state.fired.add(rule.name);
 			record({ event: "skipped", rule: rule.name, reason: "eval-error", message: decision.message, ...snapshot });
-			ctx.ui.notify(`[model-shift] Rule '${rule.name}' failed to evaluate (${decision.message}); rule disabled.`, "warning");
+			ctx.ui.notify(`[governor] Rule '${rule.name}' failed to evaluate (${decision.message}); rule disabled.`, "warning");
 			return;
 		}
 
 		const skip = (reason: string, message: string) => {
 			state.fired.add(rule.name);
 			record({ event: "skipped", rule: rule.name, reason, target: rule.use, ...snapshot });
-			ctx.ui.notify(`[model-shift] Rule '${rule.name}' matched but ${message}; rule disabled.`, "warning");
+			ctx.ui.notify(`[governor] Rule '${rule.name}' matched but ${message}; rule disabled.`, "warning");
 		};
+
+		// Prune-only rule: latch the cut and stop. A rule with `use` prunes after a successful switch.
+		const latchCut = (): void => {
+			// The cut is the start of the exchange that just ended: everything before it is older.
+			const cutTs = userTimestamps(sessionBranch).filter(Number.isFinite).at(-1);
+			if (cutTs === undefined || (state.cut && cutTs <= state.cut.cutTs)) {
+				if (!rule.repeat) state.fired.add(rule.name);
+				record({ event: "skipped", rule: rule.name, reason: "cut-not-advanced", ...snapshot });
+				return;
+			}
+			state.cut = { rule: rule.name, cutTs };
+			if (!rule.repeat) state.fired.add(rule.name);
+			record({ event: "pruned", rule: rule.name, cutTs, repeat: rule.repeat, ...snapshot });
+			ctx.ui.notify(
+				`[governor] Rule '${rule.name}' (${rule.when}) matched at ${vars.tokens} tokens: tool results before this exchange are now elided on the wire. Next prompt starts with a cold cache.`,
+				"info",
+			);
+		};
+		if (rule.use === undefined) return latchCut();
 
 		const target = ctx.models.resolve(rule.use);
 		if (!target) return skip("unresolved", `'${rule.use}' does not resolve to an available model`);
@@ -405,30 +491,51 @@ export default function modelShiftExtension(pi: ExtensionAPI) {
 		state.lastProgrammatic = modelKey(ctx.models.current() ?? target);
 		record({ event: "switched", rule: rule.name, from: current, to: state.lastProgrammatic, effort: rule.effort, revert: rule.revert, previousEffort: state.applied?.effort, ...snapshot });
 		ctx.ui.notify(
-			`[model-shift] Rule '${rule.name}' (${rule.when}) matched at $${vars.cost.toFixed(2)}, ${vars.tokens} tokens: ${current} → ${state.lastProgrammatic}${rule.effort ? ` @ ${rule.effort}` : ""}. Next prompt starts with a cold cache.`,
+			`[governor] Rule '${rule.name}' (${rule.when}) matched at $${vars.cost.toFixed(2)}, ${vars.tokens} tokens: ${current} → ${state.lastProgrammatic}${rule.effort ? ` @ ${rule.effort}` : ""}. Next prompt starts with a cold cache.`,
 			"info",
 		);
+		// Same boundary as the switch, so the prune costs no extra cold cache.
+		if (rule.prune) latchCut();
 	}
 
-	pi.registerCommand("model-shift", {
-		description: "Show model-shift rules and live variables; `reset` re-arms all rules, `reload` re-reads config",
+	// Wire-only pruning. Runs in every agent kind; with no config file, foreign pruning stays on (elide).
+	pi.on("context", (event, ctx) => {
+		if (config && !config.enabled) return;
+		const stats = emptyStats();
+		let messages = event.messages;
+		if (state.cut) messages = pruneBeforeCut(messages, state.cut.cutTs, config?.epochShape, stats);
+		if (ctx.model) messages = pruneForeignHistory(messages, ctx.model, config?.foreign ?? "elide", stats);
+		if (messages === event.messages) return;
+		lastPrune = { ...stats, model: modelKey(ctx.model) };
+		const key = JSON.stringify(lastPrune);
+		if (config?.debug && key !== lastPruneKey) log("context", lastPrune);
+		lastPruneKey = key;
+		return { messages };
+	});
+
+	pi.registerCommand("governor", {
+		description: "Show governor rules, live variables, and pruning; `reset` re-arms all rules, `reload` re-reads config",
 		handler: async (args, ctx) => {
 			const sub = args.trim();
 			if (sub === "reload") {
 				reload();
-				ctx.ui.notify(loadError ? `[model-shift] Config rejected: ${loadError}` : `[model-shift] Reloaded ${rules.length} rule(s) from ${configPath}`, loadError ? "error" : "info");
+				ctx.ui.notify(loadError ? `[governor] Config rejected: ${loadError}` : `[governor] Reloaded ${rules.length} rule(s) from ${configPath}`, loadError ? "error" : "info");
 				return;
 			}
 			if (sub === "reset") {
-				state = { fired: new Set(), paused: false };
+				state = { fired: new Set(), paused: false, cut: state.cut };
 				record({ event: "reset" });
-				ctx.ui.notify("[model-shift] All rules re-armed; pause cleared.", "info");
+				ctx.ui.notify("[governor] All rules re-armed; pause cleared (the epoch cut stays).", "info");
 				return;
 			}
 			const vars = collectVars(ctx as never);
 			const lines = [
-				`model-shift: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? "paused (manual override)" : "armed"}`,
-				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent}`,
+				`governor: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? "paused (manual override)" : "armed"}`,
+				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune}`,
+				`prune: foreign=${config?.foreign ?? "elide"} cut=${state.cut ? `${new Date(state.cut.cutTs).toISOString()} (rule ${state.cut.rule})` : "none"}`,
+				lastPrune
+					? `last pruned request (${lastPrune.model}): ${lastPrune.charsBefore - lastPrune.charsAfter} chars saved (~${Math.round((lastPrune.charsBefore - lastPrune.charsAfter) / 4)} tokens est.), foreign elided=${lastPrune.elided} dropped=${lastPrune.dropped} kept=${lastPrune.kept}, epoch elided=${lastPrune.epochElided}`
+					: "last pruned request: none this process",
 				...rules.map(r => {
 					let now = "?";
 					try {

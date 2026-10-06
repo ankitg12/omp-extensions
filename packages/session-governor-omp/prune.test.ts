@@ -1,14 +1,13 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import extension, { ELIDE_MIN_CHARS, loadConfig, pruneForeignHistory, type PruneStats } from "./model-switch-prune.ts";
+import { EPOCH_SHAPE, emptyStats, FOREIGN_SHAPE, pruneBeforeCut, pruneForeignHistory } from "./prune.ts";
+
+const ELIDE_MIN_CHARS = FOREIGN_SHAPE.minChars;
 
 const OPUS = { api: "anthropic-messages", provider: "anthropic", id: "claude-opus-5-5" };
 const FLASH = { api: "openai-completions", provider: "amd", id: "gemini-flash" };
 const BIG = (tag: string) => `${tag}HEAD${"x".repeat(ELIDE_MIN_CHARS * 2)}${tag}TAIL`;
 
-function turn(model: typeof OPUS, id: string, text: string, extra: unknown[] = []) {
+function turn(model: typeof OPUS, id: string, text: string, extra: unknown[] = [], ts = 2) {
 	return [
 		{
 			role: "assistant",
@@ -20,10 +19,10 @@ function turn(model: typeof OPUS, id: string, text: string, extra: unknown[] = [
 			usage: {},
 			timestamp: 1,
 		},
-		{ role: "toolResult", toolCallId: id, toolName: "bash", content: [{ type: "text", text }, ...extra], isError: false, timestamp: 2 },
+		{ role: "toolResult", toolCallId: id, toolName: "bash", content: [{ type: "text", text }, ...extra], isError: false, timestamp: ts },
 	];
 }
-const stats = (): PruneStats => ({ foreignCalls: 0, foreignResults: 0, kept: 0, elided: 0, dropped: 0, charsBefore: 0, charsAfter: 0 });
+const stats = emptyStats;
 
 test("native history is returned by identity (never modified)", () => {
 	const messages = [...turn(OPUS, "a", BIG("A")), ...turn(OPUS, "b", BIG("B"))] as never[];
@@ -73,26 +72,37 @@ test("pruning is stable across requests: appending turns does not change the pru
 	expect(JSON.stringify(second).startsWith(first.slice(0, -1))).toBe(true);
 });
 
-test("config falls back safely and context hook wires through", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "msp-"));
-	try {
-		const cfg = join(dir, "c.json");
-		expect(loadConfig(cfg)).toEqual({ mode: "elide", debug: false });
-		writeFileSync(cfg, JSON.stringify({ mode: "bogus" }));
-		expect(loadConfig(cfg)).toEqual({ mode: "elide", debug: false });
-		const log = join(dir, "l.log");
-		writeFileSync(cfg, JSON.stringify({ mode: "elide", debug: true }));
-		let handler: ((e: unknown, c: unknown) => unknown) | undefined;
-		extension({ on: (_n: string, fn: never) => (handler = fn) } as never, { configPath: cfg, debugLogPath: log });
-		const messages = [...turn(OPUS, "a", BIG("A")), ...turn(OPUS, "b", "s"), ...turn(OPUS, "c", "s")];
-		const res = handler?.({ messages }, { model: FLASH }) as { messages: unknown[] } | undefined;
-		expect(JSON.stringify(res?.messages)).toContain("[elided");
-		expect(JSON.stringify(res?.messages)).not.toContain("toolCall");
-		expect(handler?.({ messages }, { model: undefined })).toBeUndefined();
-		const rec = JSON.parse(readFileSync(log, "utf8").trim());
-		expect(rec.elided).toBe(1);
-		expect(JSON.stringify(rec)).not.toContain("HEAD");
-	} finally {
-		rmSync(dir, { recursive: true, force: true });
-	}
+test("epoch cut elides only results older than the cut, keeping calls and structure", () => {
+	const messages = [...turn(OPUS, "a", BIG("A"), [], 10), ...turn(OPUS, "b", BIG("B"), [], 30)] as never[];
+	const s = stats();
+	const out = pruneBeforeCut(messages, 20, EPOCH_SHAPE, s);
+	const text = JSON.stringify(out);
+	expect(s.epochElided).toBe(1);
+	expect(text).toContain("ATAIL");
+	expect(text).toContain(`BHEAD${"x".repeat(ELIDE_MIN_CHARS * 2)}BTAIL`);
+	// 2 assistant turns, each containing a toolCall
+	const calls = out.filter(m => typeof m === "object" && m !== null && "role" in m && m.role === "assistant");
+	expect(calls).toHaveLength(2);
+	expect(out).toHaveLength(messages.length);
+});
+
+test("epoch cut returns input by identity when nothing qualifies", () => {
+	const messages = [...turn(OPUS, "a", "small", [], 10), ...turn(OPUS, "b", BIG("B"), [], 30)] as never[];
+	expect(pruneBeforeCut(messages, 20)).toBe(messages);
+});
+
+test("a latched cut keeps the pruned prefix byte-identical as the session grows (cache-stable)", () => {
+	const base = [...turn(OPUS, "a", BIG("A"), [], 10), ...turn(OPUS, "b", BIG("B"), [], 30)] as never[];
+	const first = JSON.stringify(pruneBeforeCut(base, 20));
+	const grown = [...base, ...turn(OPUS, "c", BIG("C"), [], 40), ...turn(OPUS, "d", BIG("D"), [], 50)] as never[];
+	expect(JSON.stringify(pruneBeforeCut(grown, 20)).startsWith(first.slice(0, -1))).toBe(true);
+});
+
+test("epoch and foreign passes compose", () => {
+	const messages = [...turn(OPUS, "a", BIG("A"), [], 10), ...turn(OPUS, "b", BIG("B"), [], 11), ...turn(OPUS, "c", BIG("C"), [], 12), ...turn(FLASH, "d", BIG("D"), [], 13)] as never[];
+	const s = stats();
+	const out = pruneForeignHistory(pruneBeforeCut(messages, 13, EPOCH_SHAPE, s), FLASH, "elide", s);
+	expect(s.epochElided).toBe(3);
+	expect(JSON.stringify(out)).toContain(`DHEAD${"x".repeat(ELIDE_MIN_CHARS * 2)}DTAIL`);
+	expect(s.charsAfter).toBeLessThan(s.charsBefore);
 });

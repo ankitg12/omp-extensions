@@ -13,10 +13,11 @@ import {
 	restoreState,
 	type RuleVars,
 	type ShiftState,
-} from "./model-shift.ts";
+} from "./governor.ts";
 
 const env = createEnvironment();
 const vars = (over: Partial<RuleVars> = {}): RuleVars => ({
+	turns_since_prune: 3n,
 	cost: 0.5,
 	tokens: 20_000n,
 	context_window: 200_000n,
@@ -40,8 +41,13 @@ describe("compileRules", () => {
 	test("rejects non-bool expression", () => {
 		expect(() => compileRules(env, [{ when: "cost", use: "x" }])).toThrow(/must be bool, got double/);
 	});
-	test("rejects missing use and duplicate names", () => {
-		expect(() => compileRules(env, [{ when: "true" } as never])).toThrow(/'use'/);
+	test("requires at least one of use or prune", () => {
+		expect(() => compileRules(env, [{ when: "true" } as never])).toThrow(/needs 'use' .* or 'prune: true'/);
+	});
+	test("accepts prune-only rule", () => {
+		expect(compileRules(env, [{ when: "tokens > 100000", prune: true }])).toHaveLength(1);
+	});
+	test("rejects duplicate rule names", () => {
 		expect(() => compileRules(env, [{ name: "a", when: "true", use: "x" }, { name: "a", when: "true", use: "y" }])).toThrow(/duplicate/);
 	});
 });
@@ -135,10 +141,22 @@ describe("session readers", () => {
 		expect(r.fired.size).toBe(0);
 		expect(r.lastProgrammatic).toBeUndefined();
 	});
+
+	test("restoreState replays pruned cut and legacy model-shift entries", () => {
+		const g = (data: object) => ({ type: "custom", customType: ENTRY_TYPE, data });
+		const m = (data: object) => ({ type: "custom", customType: "model-shift", data });
+		const s = restoreState([
+			m({ event: "switched", rule: "legacy-rule", to: "p/sonnet" }),
+			g({ event: "pruned", rule: "epoch-rule", cutTs: 12345 }),
+		]);
+		expect(s.lastProgrammatic).toBe("p/sonnet");
+		expect(s.cut).toEqual({ rule: "epoch-rule", cutTs: 12345 });
+		expect(s.fired.has("epoch-rule")).toBe(true);
+	});
 });
 
 describe("loadConfig", () => {
-	const dir = mkdtempSync(join(tmpdir(), "model-shift-"));
+	const dir = mkdtempSync(join(tmpdir(), "governor-"));
 	test("missing file → inert", () => expect(loadConfig(join(dir, "nope.yml"))).toBeUndefined());
 	test("YAML with CEL quoting parses", () => {
 		const p = join(dir, "c.yml");

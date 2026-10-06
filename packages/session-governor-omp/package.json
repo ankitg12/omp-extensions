@@ -1,0 +1,16 @@
+{
+	"name": "@ankitg12/session-governor-omp",
+	"version": "0.2.0",
+	"description": "One CEL policy engine for an OMP session: switch model, set effort, and prune context on the wire",
+	"license": "MIT",
+	"author": "Ankit Gaur",
+	"type": "module",
+	"main": "governor.ts",
+	"keywords": ["pi-package", "pi-extension", "extension", "model", "cel", "budget", "context", "prune"],
+	"pi": {
+		"extensions": ["./governor.ts"]
+	},
+	"dependencies": {
+		"@marcbachmann/cel-js": "^8.0.0"
+	}
+}

@@ -18,8 +18,8 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const [from = "@smol", to = "@scout"] = process.argv.slice(2);
-const dir = mkdtempSync(join(tmpdir(), "model-shift-live-"));
-const config = join(dir, "model-shift.yml");
+const dir = mkdtempSync(join(tmpdir(), "governor-live-"));
+const config = join(dir, "governor.yml");
 const afkMode = process.env.AFK === "1";
 writeFileSync(
 	config,
@@ -28,14 +28,14 @@ writeFileSync(
 		: `rules:\n  - name: live-check\n    when: 'turns >= 1'\n    use: '${to}'\n`,
 );
 
-const extension = fileURLToPath(new URL("./model-shift.ts", import.meta.url));
+const extension = fileURLToPath(new URL("./governor.ts", import.meta.url));
 const args = ["--mode", "rpc", "--no-session", "--no-tools", "--no-lsp", "--no-skills", "--no-rules", "--no-title", "--no-extensions", "--extension", extension, "--model", from];
 if (process.env.WITH_DECAY === "1") args.push("--extension", fileURLToPath(new URL("../decaying-effort-omp/decaying-effort.ts", import.meta.url)));
 if (afkMode) args.push("--extension", fileURLToPath(new URL("../agent-afk-omp/agent-afk.ts", import.meta.url)));
 const child = spawn(process.env.OMP_BIN ?? "omp", args, {
 	cwd: dir,
 	stdio: ["pipe", "pipe", "inherit"],
-	env: { ...process.env, OMP_MODEL_SHIFT_CONFIG: config, OMP_MODEL_SHIFT_LOG: join(dir, "log.jsonl") },
+	env: { ...process.env, OMP_GOVERNOR_CONFIG: config, OMP_GOVERNOR_LOG: join(dir, "log.jsonl") },
 });
 const send = (o: object) => child.stdin.write(`${JSON.stringify(o)}\n`);
 
@@ -50,10 +50,10 @@ function finish(error?: string) {
 	clearTimeout(timeout);
 	child.stdin.end();
 	child.kill();
-	const switched = /\[model-shift\] Rule 'live-check'/.test(notice) && models.length >= 2 && models[0] !== models[1];
+	const switched = /\[governor\] Rule 'live-check'/.test(notice) && models.length >= 2 && models[0] !== models[1];
 	const reverted = !afkMode || (models.length >= 3 && models[2] === models[0] && notices.some(n => /no longer holds/.test(n)));
 	const passed = !error && !decayOverride && switched && reverted;
-	console.log(JSON.stringify({ check: "model-shift-live", from, to, afkMode, withDecay: process.env.WITH_DECAY === "1", assistantModels: models, notices, decayOverride, error, passed }, null, 1));
+	console.log(JSON.stringify({ check: "governor-live", from, to, afkMode, withDecay: process.env.WITH_DECAY === "1", assistantModels: models, notices, decayOverride, error, passed }, null, 1));
 	process.exitCode = passed ? 0 : 1;
 }
 
@@ -69,7 +69,7 @@ createInterface({ input: child.stdout }).on("line", line => {
 	const msg = (typeof ev.message === "object" && ev.message !== null ? ev.message : {}) as { role?: string; provider?: string; model?: string };
 	if (ev.type === "ready") send({ id: "p1", type: "prompt", message: "Reply with the single word: one" });
 	if (ev.type === "message_end" && msg.role === "assistant") models.push(`${msg.provider}/${msg.model}`);
-	if (ev.type === "extension_ui_request" && ev.method === "notify" && String(ev.message).startsWith("[model-shift]")) {
+	if (ev.type === "extension_ui_request" && ev.method === "notify" && String(ev.message).startsWith("[governor]")) {
 		notice ||= String(ev.message);
 		notices.push(String(ev.message));
 	}
