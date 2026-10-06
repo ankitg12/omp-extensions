@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@ankitg12/model-shift-omp",
+      "name": "@ankitg12/session-governor-omp",
       "dependencies": {
         "@marcbachmann/cel-js": "^8.0.0",
       },

@@ -109,7 +109,7 @@ export default function agentAfk(pi: ExtensionAPI) {
 	let unsubscribeInput: (() => void) | undefined;
 
 	/**
-	 * Announce AFK state on the shared bus as `afk:changed`. Listeners (e.g. model-shift-omp)
+	 * Announce AFK state on the shared bus as `afk:changed`. Listeners (e.g. session-governor-omp)
 	 * may call `waitUntil(promise)` to finish work, such as a model switch, before the AFK/back
 	 * prompt is sent. Waits are bounded so a slow listener cannot block AFK.
 	 */
