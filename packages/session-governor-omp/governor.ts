@@ -591,6 +591,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 			const lines = [
 				`governor: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? `armed; model rules paused (manual /model)${state.effortPaused ? ", effort rules paused (manual effort)" : ""}` : state.effortPaused ? "armed; effort rules paused (manual effort)" : "armed"}`,
 				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune} blocked_streak=${vars.blocked_streak} attempts_on_goal=${vars.attempts_on_goal}`,
+				...(pi.getAllTools().some(t => t.name === "progress") ? [] : ["WARNING: no `progress` tool (load agent-progress-tool-omp); blocked_streak/attempts_on_goal stay 0, stuck rules cannot fire"]),
 				`prune: cut=${state.cut ? `${new Date(state.cut.cutTs).toISOString()} (rule ${state.cut.rule})` : "none"}`,
 				lastPrune
 					? `last pruned request (${lastPrune.model}): ${lastPrune.charsBefore - lastPrune.charsAfter} chars saved (~${Math.round((lastPrune.charsBefore - lastPrune.charsAfter) / 4)} tokens est.), epoch elided=${lastPrune.epochElided} (model-switch pruning: model-switch-prune-omp)`
