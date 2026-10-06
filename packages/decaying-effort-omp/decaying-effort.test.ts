@@ -1,131 +1,162 @@
 import { describe, expect, test } from "bun:test";
-import decayingEffortExtension, { DEFAULT_SCHEDULE, type ConfiguredThinkingLevel } from "./decaying-effort.ts";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import decayingEffortExtension, { type ConfiguredThinkingLevel } from "./decaying-effort.ts";
 
-interface MockExtensionAPI {
-	hooks: Map<string, Function[]>;
-	commands: Map<string, { description?: string; handler: Function }>;
-	currentThinkingLevel: ConfiguredThinkingLevel | undefined;
-	notifications: { message: string; level: string }[];
-	api: any;
+type Handler = (event: unknown, ctx: MockCtx) => Promise<void> | void;
+type CommandHandler = (args: string, ctx: MockCtx) => Promise<void> | void;
+
+interface ThinkingEntry {
+	type: "thinking_level_change";
+	thinkingLevel: string;
+	configured: string | null;
 }
 
-function createMockAPI(initialLevel: ConfiguredThinkingLevel = "inherit"): MockExtensionAPI {
-	const hooks = new Map<string, Function[]>();
-	const commands = new Map<string, { description?: string; handler: Function }>();
-	const notifications: { message: string; level: string }[] = [];
-	let currentThinkingLevel: ConfiguredThinkingLevel | undefined = initialLevel;
+interface MockCtx {
+	ui: { notify(message: string, level: string): void };
+	sessionManager: { getEntries(): readonly unknown[] };
+}
+
+/**
+ * Mirrors real OMP semantics (runtime-init.ts / model-controls.ts):
+ * - `getThinkingLevel()` returns the RESOLVED level, never "auto".
+ * - every change appends a `thinking_level_change` entry carrying `configured` (the selector).
+ * - with "auto" selected, the auto-thinking judge re-resolves per prompt without changing `configured`.
+ */
+function createMockOmp(maxLevel?: ConfiguredThinkingLevel) {
+	const order = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+	const hooks = new Map<string, Handler[]>();
+	const commands = new Map<string, { description?: string; handler: CommandHandler }>();
+	const notifications: string[] = [];
+	const entries: ThinkingEntry[] = [{ type: "thinking_level_change", thinkingLevel: "low", configured: null }];
+	let configured: string = "inherit";
+	let resolved = "low";
+
+	const record = () => entries.push({ type: "thinking_level_change", thinkingLevel: resolved, configured });
 
 	const api = {
-		on(event: string, handler: Function) {
-			const list = hooks.get(event) ?? [];
-			list.push(handler);
-			hooks.set(event, list);
+		on(event: string, handler: Handler) {
+			hooks.set(event, [...(hooks.get(event) ?? []), handler]);
 		},
-		registerCommand(name: string, def: { description?: string; handler: Function }) {
+		registerCommand(name: string, def: { description?: string; handler: CommandHandler }) {
 			commands.set(name, def);
 		},
-		getThinkingLevel() {
-			return currentThinkingLevel;
+		getThinkingLevel: () => resolved,
+		setThinkingLevel(level: string) {
+			if (level === "auto") {
+				configured = "auto";
+				resolved = "low"; // provisional resolution, like real OMP
+			} else {
+				configured = maxLevel && order.indexOf(level) > order.indexOf(maxLevel) ? maxLevel : level;
+				resolved = configured;
+			}
+			record();
 		},
-		setThinkingLevel(level: ConfiguredThinkingLevel) {
-			currentThinkingLevel = level;
-		},
+	};
+
+	const ctx: MockCtx = {
+		ui: { notify: message => void notifications.push(message) },
+		sessionManager: { getEntries: () => entries },
 	};
 
 	return {
-		hooks,
-		commands,
-		get currentThinkingLevel() {
-			return currentThinkingLevel;
-		},
-		set currentThinkingLevel(lvl) {
-			currentThinkingLevel = lvl;
-		},
+		api: api as unknown as ExtensionAPI, // structural test double of the slice the extension uses
 		notifications,
-		api,
+		ctx,
+		get configured() {
+			return configured;
+		},
+		/** OMP's auto-thinking judge picks a level for this prompt; the selector stays "auto". */
+		autoJudge(level: string) {
+			resolved = level;
+			record();
+		},
+		/** The user picks a level via Shift+Tab / selector. */
+		userSelects(level: string) {
+			configured = level;
+			resolved = level;
+			record();
+		},
+		turn: () => hooks.get("before_agent_start")![0]!({}, ctx),
+		command: (args: string) => commands.get("effort-decay")!.handler(args, ctx),
 	};
 }
 
-const mockCtx = (notifications: { message: string; level: string }[]) => ({
-	ui: {
-		notify(message: string, level: string) {
-			notifications.push({ message, level });
-		},
-	},
-});
+const overrideNotices = (n: string[]) => n.filter(m => m.includes("Manual override detected"));
 
 describe("decaying-effort-omp", () => {
 	test("defaults to max -> xhigh -> high -> medium -> auto schedule", async () => {
-		const mock = createMockAPI();
-		decayingEffortExtension(mock.api);
-
-		const beforeAgentStart = mock.hooks.get("before_agent_start")?.[0];
-		expect(beforeAgentStart).toBeDefined();
-
-		const expected = ["max", "xhigh", "high", "medium", "auto", "auto"];
-		for (const target of expected) {
-			await beforeAgentStart?.({}, mockCtx(mock.notifications));
-			expect(mock.currentThinkingLevel).toBe(target);
+		const omp = createMockOmp();
+		decayingEffortExtension(omp.api);
+		for (const target of ["max", "xhigh", "high", "medium", "auto", "auto"]) {
+			await omp.turn();
+			expect(omp.configured).toBe(target);
 		}
 	});
 
 	test("respects manual user override", async () => {
-		const mock = createMockAPI();
-		decayingEffortExtension(mock.api);
+		const omp = createMockOmp();
+		decayingEffortExtension(omp.api);
+		await omp.turn();
+		expect(omp.configured).toBe("max");
+		omp.userSelects("low");
+		await omp.turn();
+		expect(omp.configured).toBe("low");
+		expect(overrideNotices(omp.notifications)).toHaveLength(1);
+	});
 
-		const beforeAgentStart = mock.hooks.get("before_agent_start")?.[0];
+	// Regression: session 01a10f66 (2026-10-06) — the auto judge re-resolved low -> high and
+	// the extension reported a manual override on every subsequent turn.
+	test("auto-thinking judge re-resolution is not a manual override", async () => {
+		const omp = createMockOmp();
+		decayingEffortExtension(omp.api);
+		for (let i = 0; i < 5; i++) await omp.turn(); // reaches "auto"
+		expect(omp.configured).toBe("auto");
+		for (const judged of ["high", "low", "high"]) {
+			omp.autoJudge(judged);
+			await omp.turn();
+			expect(omp.configured).toBe("auto");
+		}
+		expect(overrideNotices(omp.notifications)).toHaveLength(0);
+	});
 
-		// Turn 1 -> max
-		await beforeAgentStart?.({}, mockCtx(mock.notifications));
-		expect(mock.currentThinkingLevel).toBe("max");
+	test("model ceiling clamp is not a manual override", async () => {
+		const omp = createMockOmp("high");
+		decayingEffortExtension(omp.api);
+		await omp.turn(); // max -> clamped high
+		await omp.turn(); // xhigh -> clamped high
+		expect(omp.configured).toBe("high");
+		expect(omp.notifications.some(m => m.includes("clamped from max"))).toBe(true);
+		expect(overrideNotices(omp.notifications)).toHaveLength(0);
+	});
 
-		// User manually switches to "low"
-		mock.currentThinkingLevel = "low";
-
-		// Turn 2 should detect override and keep "low"
-		await beforeAgentStart?.({}, mockCtx(mock.notifications));
-		expect(mock.currentThinkingLevel).toBe("low");
+	test("override is announced once, not every turn", async () => {
+		const omp = createMockOmp();
+		decayingEffortExtension(omp.api);
+		for (let i = 0; i < 5; i++) await omp.turn();
+		omp.userSelects("high");
+		for (let i = 0; i < 4; i++) await omp.turn();
+		expect(omp.configured).toBe("high");
+		expect(overrideNotices(omp.notifications)).toHaveLength(1);
 	});
 
 	test("slash command reset restores decay", async () => {
-		const mock = createMockAPI();
-		decayingEffortExtension(mock.api);
-
-		const beforeAgentStart = mock.hooks.get("before_agent_start")?.[0];
-		const cmd = mock.commands.get("effort-decay");
-
-		// Turn 1 -> max, Turn 2 -> xhigh
-		await beforeAgentStart?.({}, mockCtx(mock.notifications));
-		await beforeAgentStart?.({}, mockCtx(mock.notifications));
-		expect(mock.currentThinkingLevel).toBe("xhigh");
-
-		// User resets
-		await cmd?.handler("reset", mockCtx(mock.notifications));
-
-		// Next turn starts at max again
-		await beforeAgentStart?.({}, mockCtx(mock.notifications));
-		expect(mock.currentThinkingLevel).toBe("max");
+		const omp = createMockOmp();
+		decayingEffortExtension(omp.api);
+		await omp.turn();
+		await omp.turn();
+		expect(omp.configured).toBe("xhigh");
+		await omp.command("reset");
+		await omp.turn();
+		expect(omp.configured).toBe("max");
 	});
 
 	test("custom schedule configuration", async () => {
-		const mock = createMockAPI();
-		decayingEffortExtension(mock.api);
-
-		const beforeAgentStart = mock.hooks.get("before_agent_start")?.[0];
-		const cmd = mock.commands.get("effort-decay");
-
-		await cmd?.handler("schedule high,low", mockCtx(mock.notifications));
-
-		// Turn 1 -> high
-		await beforeAgentStart?.({}, mockCtx(mock.notifications));
-		expect(mock.currentThinkingLevel).toBe("high");
-
-		// Turn 2 -> low
-		await beforeAgentStart?.({}, mockCtx(mock.notifications));
-		expect(mock.currentThinkingLevel).toBe("low");
-
-		// Turn 3 -> remains low
-		await beforeAgentStart?.({}, mockCtx(mock.notifications));
-		expect(mock.currentThinkingLevel).toBe("low");
+		const omp = createMockOmp();
+		decayingEffortExtension(omp.api);
+		await omp.command("schedule high,low");
+		for (const target of ["high", "low", "low"]) {
+			await omp.turn();
+			expect(omp.configured).toBe(target);
+		}
 	});
 });

@@ -30,6 +30,15 @@ export const DEFAULT_SCHEDULE: ConfiguredThinkingLevel[] = [
 
 const DEFAULT_LOG_PATH = join(homedir(), ".omp", "logs", "decaying-effort.jsonl");
 
+/** Minimal slice of the extension context this module reads; entries are untyped session JSONL rows. */
+interface EntriesCtx {
+	sessionManager?: { getEntries?: () => readonly unknown[] };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
 export default function decayingEffortExtension(pi: ExtensionAPI) {
 	let turnCount = 0;
 	let userOverridden = false;
@@ -59,10 +68,33 @@ export default function decayingEffortExtension(pi: ExtensionAPI) {
 		} catch {}
 	}
 
-	const resetOrResumeState = (reason: string, ctx?: any) => {
-		const entries = ctx?.sessionManager?.getEntries?.();
-		if (Array.isArray(entries) && entries.length > 0) {
-			const userTurns = entries.filter((e: any) => e.type === "message" && e.message?.role === "user").length;
+	/**
+	 * The level the user (or this extension) *selected*, not the level OMP resolved it to.
+	 *
+	 * `pi.getThinkingLevel()` returns the resolved level: with `auto` selected, OMP's
+	 * auto-thinking judge re-resolves it per prompt (e.g. low -> high), so comparing
+	 * resolved levels misreads the judge as a manual override. OMP records the selector
+	 * as `configured` on every `thinking_level_change` session entry; read the latest.
+	 * Falls back to the resolved level when no entry carries `configured`.
+	 * TODO: switch to an official ExtensionAPI accessor once one exists upstream.
+	 */
+	function configuredLevel(ctx?: EntriesCtx): string {
+		const entries = ctx?.sessionManager?.getEntries?.() ?? [];
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const e = entries[i];
+			if (!isRecord(e) || e.type !== "thinking_level_change") continue;
+			if (typeof e.configured === "string") return e.configured;
+			break;
+		}
+		return (pi.getThinkingLevel() ?? "inherit") as string;
+	}
+
+	const resetOrResumeState = (reason: string, ctx?: EntriesCtx) => {
+		const entries = ctx?.sessionManager?.getEntries?.() ?? [];
+		if (entries.length > 0) {
+			const userTurns = entries.filter(
+				e => isRecord(e) && e.type === "message" && isRecord(e.message) && e.message.role === "user",
+			).length;
 			turnCount = userTurns;
 			logJSONL("session_resumed", { reason, turnCount, historyEntries: entries.length });
 		} else {
@@ -84,7 +116,10 @@ export default function decayingEffortExtension(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (_event, ctx) => {
 		if (!config.enabled) return;
 
-		const currentLevel = (pi.getThinkingLevel() ?? "inherit") as string;
+		// Manual mode is sticky: notify once at detection, then stay silent.
+		if (userOverridden) return;
+
+		const currentLevel = configuredLevel(ctx);
 		if (lastProgrammaticLevel !== undefined && currentLevel !== lastProgrammaticLevel) {
 			userOverridden = true;
 			logJSONL("user_override_detected", {
@@ -98,8 +133,6 @@ export default function decayingEffortExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		if (userOverridden) return;
-
 		turnCount++;
 		const targetIndex = Math.min(turnCount - 1, config.schedule.length - 1);
 		const targetLevel = config.schedule[targetIndex];
@@ -107,9 +140,10 @@ export default function decayingEffortExtension(pi: ExtensionAPI) {
 		if (targetLevel && targetLevel !== currentLevel) {
 			pi.setThinkingLevel(targetLevel as unknown as Parameters<typeof pi.setThinkingLevel>[0]);
 			const effective = (pi.getThinkingLevel() ?? targetLevel) as string;
-			lastProgrammaticLevel = effective;
+			// Remember the selector (e.g. "auto", or the clamped level), not the resolved level.
+			lastProgrammaticLevel = configuredLevel(ctx);
 			const isAuto = targetLevel === "auto";
-			const wasClamped = !isAuto && effective !== targetLevel;
+			const wasClamped = !isAuto && lastProgrammaticLevel !== targetLevel;
 			logJSONL("effort_stepped", {
 				turnCount,
 				targetLevel,
