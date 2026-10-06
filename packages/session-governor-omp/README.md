@@ -63,7 +63,9 @@ rules:                 # ordered; first matching rule wins
 
 ### Stuck detection (agent self-report)
 
-The extension registers an essential tool, `progress` (`goal`, `status: progress|blocked|done`, `evidence`).
+The `progress` tool (`goal`, `status: progress|blocked|done`, `evidence`) is registered by
+[`agent-progress-tool-omp`](../agent-progress-tool-omp), not by the governor. Without that package the
+counters below stay at 0 and stuck rules never fire.
 The agent calls it once per turn. Two CEL variables are derived from those calls in the session branch,
 so they survive resume and follow branch switches:
 
