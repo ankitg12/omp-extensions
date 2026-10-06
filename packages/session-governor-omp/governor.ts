@@ -213,8 +213,8 @@ function evaluateRule(env: Environment, rule: CompiledRule, vars: RuleVars): { o
  * first not-yet-fired rule whose expression is true switches. Runtime errors are reported, never thrown.
  */
 export function decide(env: Environment, rules: CompiledRule[], vars: RuleVars, state: ShiftState): Decision {
-	if (state.paused) return { kind: "none" };
-	if (state.applied) {
+	// A manual model change pauses model rules only; effort and prune rules keep running.
+	if (state.applied && !state.paused) {
 		const rule = rules.find(r => r.name === state.applied?.rule);
 		const result = rule ? evaluateRule(env, rule, vars) : { ok: true as const, value: false };
 		if (result.ok && result.value) return { kind: "none" };
@@ -223,6 +223,7 @@ export function decide(env: Environment, rules: CompiledRule[], vars: RuleVars, 
 	for (const rule of rules) {
 		if (state.fired.has(rule.name)) continue;
 		if (state.effortPaused && isEffortOnly(rule)) continue;
+		if (state.paused && rule.use !== undefined) continue;
 		const result = evaluateRule(env, rule, vars);
 		if (!result.ok) return { kind: "error", rule, message: result.message };
 		if (result.value) return { kind: "switch", rule };
@@ -433,14 +434,14 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	});
 
 	async function evaluate(ctx: EvalCtx, trigger: string): Promise<void> {
-		if (!config?.enabled || rules.length === 0 || state.paused) return;
+		if (!config?.enabled || rules.length === 0) return;
 		if (!config.agents.includes(ctx.agent?.kind ?? "main")) return;
 
 		const current = modelKey(ctx.model);
-		if (state.lastProgrammatic && current !== state.lastProgrammatic) {
+		if (!state.paused && state.lastProgrammatic && current !== state.lastProgrammatic) {
 			state.paused = true;
 			record({ event: "paused", expected: state.lastProgrammatic, current });
-			ctx.ui.notify(`[governor] Manual model change to ${current} detected; automatic switching paused for this session.`, "info");
+			ctx.ui.notify(`[governor] Manual model change to ${current} detected; model rules paused for this session (effort and prune rules stay armed).`, "info");
 			return;
 		}
 		const effortNow = (): string => configuredEffort((ctx as unknown as SessionCtx).sessionManager?.getEntries?.() ?? []) ?? String(pi.getThinkingLevel() ?? "inherit");
@@ -585,7 +586,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 			}
 			const vars = collectVars(ctx as never);
 			const lines = [
-				`governor: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? "paused (manual override)" : "armed"}`,
+				`governor: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? `armed; model rules paused (manual /model)${state.effortPaused ? ", effort rules paused (manual effort)" : ""}` : state.effortPaused ? "armed; effort rules paused (manual effort)" : "armed"}`,
 				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune}`,
 				`prune: foreign=${config?.foreign ?? "elide"} cut=${state.cut ? `${new Date(state.cut.cutTs).toISOString()} (rule ${state.cut.rule})` : "none"}`,
 				lastPrune

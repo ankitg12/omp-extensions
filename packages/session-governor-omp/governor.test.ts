@@ -99,6 +99,23 @@ describe("effort schedule (decaying-effort port)", () => {
 		const d2 = decide(env, rules, vars({ turns: 2n }), s);
 		expect(d2.kind === "switch" && d2.rule.name).toBe("e2");
 	});
+	test("manual /model pause skips model rules but not effort or prune rules", () => {
+		const r = compileRules(env, [
+			{ name: "budget", when: "cost > 1", use: "sonnet" },
+			{ name: "cut", when: "tokens > 10", prune: true, repeat: true },
+			{ name: "e", when: "turns >= 1", effort: "auto" },
+		]);
+		const s = { ...fresh(), paused: true };
+		const d1 = decide(env, r, vars({ cost: 2, tokens: 20n, turns: 1n }), s);
+		expect(d1.kind === "switch" && d1.rule.name).toBe("cut");
+		const d2 = decide(env, r, vars({ cost: 2, tokens: 5n, turns: 1n }), s);
+		expect(d2.kind === "switch" && d2.rule.name).toBe("e");
+	});
+	test("manual /model pause does not revert an applied rule", () => {
+		const r = compileRules(env, [{ name: "away", when: "afk", use: "@smol", revert: true }]);
+		const s = { ...fresh(), paused: true, applied: { rule: "away", from: "p/opus" } };
+		expect(decide(env, r, vars({ afk: false }), s).kind).toBe("none");
+	});
 	test("effortPaused skips effort-only rules but not model rules", () => {
 		const s = { ...fresh(), effortPaused: true };
 		const d = decide(env, rules, vars({ turns: 2n, cost: 2 }), s);
