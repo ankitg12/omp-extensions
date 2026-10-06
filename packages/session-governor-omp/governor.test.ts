@@ -27,7 +27,7 @@ const vars = (over: Partial<RuleVars> = {}): RuleVars => ({
 	context_pct: 10,
 	turns: 3n,
 	elapsed_min: 5,
-	model: "amd-claude/claude-opus-5.5",
+	model: "anthropic/claude-opus-5.5",
 	agent: "main",
 	afk: false,
 	...over,
@@ -62,7 +62,7 @@ describe("compileRules", () => {
 
 describe("decide", () => {
 	const rules = compileRules(env, [
-		{ name: "budget", when: 'cost > 1.0 && model.startsWith("amd-claude/claude-opus")', use: "sonnet" },
+		{ name: "budget", when: 'cost > 1.0 && model.startsWith("anthropic/claude-opus")', use: "sonnet" },
 		{ name: "big", when: "tokens > 100000", use: "haiku" },
 	]);
 	test("no rule matches below thresholds", () => {
@@ -221,7 +221,7 @@ describe("loadConfig", () => {
 	test("missing file → inert", () => expect(loadConfig(join(dir, "nope.yml"))).toBeUndefined());
 	test("YAML with CEL quoting parses", () => {
 		const p = join(dir, "c.yml");
-		writeFileSync(p, `rules:\n  - name: budget\n    when: 'cost > 1 && model.startsWith("amd-claude/claude-opus")'\n    use: '@smol'\n`);
+		writeFileSync(p, `rules:\n  - name: budget\n    when: 'cost > 1 && model.startsWith("anthropic/claude-opus")'\n    use: '@smol'\n`);
 		const c = loadConfig(p)!;
 		expect(c.enabled).toBe(true);
 		expect(c.agents).toEqual(["main"]);

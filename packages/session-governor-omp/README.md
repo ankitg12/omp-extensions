@@ -30,8 +30,8 @@ prune:
 
 rules:                 # ordered; first matching rule wins
   - name: budget
-    when: 'cost > 1.0 && model.startsWith("amd-claude/claude-opus")'
-    use: amd-claude/claude-sonnet-4.5
+    when: 'cost > 1.0 && model.startsWith("anthropic/claude-opus")'
+    use: anthropic/claude-sonnet-4.5
     prune: true        # prune older tool results at the same boundary
 
   - name: context-epoch
@@ -70,7 +70,7 @@ A new goal text (compared case- and space-insensitively) resets both counters.
 
 ```yaml
   - name: stuck-escalate
-    when: '(blocked_streak >= 3 || attempts_on_goal >= 6) && !model.startsWith("amd-claude/claude-opus")'
+    when: '(blocked_streak >= 3 || attempts_on_goal >= 6) && !model.startsWith("anthropic/claude-opus")'
     use: '@slow'
     effort: high
 ```

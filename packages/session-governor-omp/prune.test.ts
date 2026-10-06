@@ -4,7 +4,7 @@ import { EPOCH_SHAPE, emptyStats, FOREIGN_SHAPE, pruneBeforeCut, pruneForeignHis
 const ELIDE_MIN_CHARS = FOREIGN_SHAPE.minChars;
 
 const OPUS = { api: "anthropic-messages", provider: "anthropic", id: "claude-opus-5-5" };
-const FLASH = { api: "openai-completions", provider: "amd", id: "gemini-flash" };
+const FLASH = { api: "openai-completions", provider: "google", id: "gemini-flash" };
 const BIG = (tag: string) => `${tag}HEAD${"x".repeat(ELIDE_MIN_CHARS * 2)}${tag}TAIL`;
 
 function turn(model: typeof OPUS, id: string, text: string, extra: unknown[] = [], ts = 2) {

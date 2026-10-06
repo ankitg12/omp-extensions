@@ -48,7 +48,7 @@ describe("stuck escalation rule (2026-10-05 SSH outage replay shape)", () => {
 	]);
 	const base: RuleVars = {
 		cost: 0.5, tokens: 20_000n, context_window: 200_000n, context_pct: 10, turns: 5n, elapsed_min: 30,
-		model: "amd-gemini/gemini-3.8-flash", agent: "main", afk: false, turns_since_prune: 5n,
+		model: "google/gemini-3.8-flash", agent: "main", afk: false, turns_since_prune: 5n,
 		blocked_streak: 0n, attempts_on_goal: 0n,
 	};
 	const fresh = (): ShiftState => ({ fired: new Set(), paused: false });
