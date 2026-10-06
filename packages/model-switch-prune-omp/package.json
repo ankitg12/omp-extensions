@@ -1,0 +1,13 @@
+{
+	"name": "@ankitg12/model-switch-prune-omp",
+	"version": "0.1.0",
+	"description": "After a model switch, flattens tool turns written by the previous model and elides their oversized results (wire-only)",
+	"license": "MIT",
+	"author": "Ankit Gaur",
+	"type": "module",
+	"main": "model-switch-prune.ts",
+	"keywords": ["pi-package", "pi-extension", "extension", "model", "context", "tokens"],
+	"pi": {
+		"extensions": ["./model-switch-prune.ts"]
+	}
+}
