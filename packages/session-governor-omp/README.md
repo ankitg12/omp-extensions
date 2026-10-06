@@ -55,6 +55,29 @@ rules:                 # ordered; first matching rule wins
     effort: auto
 ```
 
+### Stuck detection (agent self-report)
+
+The extension registers an essential tool, `progress` (`goal`, `status: progress|blocked|done`, `evidence`).
+The agent calls it once per turn. Two CEL variables are derived from those calls in the session branch,
+so they survive resume and follow branch switches:
+
+| Variable | Meaning |
+|---|---|
+| `blocked_streak` | `blocked` reports in a row on the current goal |
+| `attempts_on_goal` | Reports on the current goal since its last `done`, any status; catches a model that reports `progress` but never finishes |
+
+A new goal text (compared case- and space-insensitively) resets both counters.
+
+```yaml
+  - name: stuck-escalate
+    when: '(blocked_streak >= 3 || attempts_on_goal >= 6) && !model.startsWith("amd-claude/claude-opus")'
+    use: '@slow'
+    effort: high
+```
+
+Known limits: a stuck model can reset the counters by rewording its goal; each turn costs one extra
+tool round trip; models that never call the tool never escalate.
+
 ### Manual overrides
 
 The engine has two independent pauses. Both persist in the session and `/governor reset` clears both.

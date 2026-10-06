@@ -19,6 +19,8 @@ import {
 const env = createEnvironment();
 const vars = (over: Partial<RuleVars> = {}): RuleVars => ({
 	turns_since_prune: 3n,
+	blocked_streak: 0n,
+	attempts_on_goal: 0n,
 	cost: 0.5,
 	tokens: 20_000n,
 	context_window: 200_000n,

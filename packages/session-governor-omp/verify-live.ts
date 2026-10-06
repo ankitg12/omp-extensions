@@ -39,7 +39,10 @@ const child = spawn(process.env.OMP_BIN ?? "omp", args, {
 });
 const send = (o: object) => child.stdin.write(`${JSON.stringify(o)}\n`);
 
+/** Model of each turn (its last assistant message); a turn can have several when the agent calls tools. */
 const models: string[] = [];
+let turnModel = "";
+const progressCalls: unknown[] = [];
 let notice = "";
 const notices: string[] = [];
 let decayOverride = "";
@@ -53,7 +56,7 @@ function finish(error?: string) {
 	const switched = /\[governor\] Rule 'live-check'/.test(notice) && models.length >= 2 && models[0] !== models[1];
 	const reverted = !afkMode || (models.length >= 3 && models[2] === models[0] && notices.some(n => /no longer holds/.test(n)));
 	const passed = !error && !decayOverride && switched && reverted;
-	console.log(JSON.stringify({ check: "governor-live", from, to, afkMode, withDecay: process.env.WITH_DECAY === "1", assistantModels: models, notices, decayOverride, error, passed }, null, 1));
+	console.log(JSON.stringify({ check: "governor-live", from, to, afkMode, withDecay: process.env.WITH_DECAY === "1", turnModels: models, progressCalls, notices, decayOverride, error, passed }, null, 1));
 	process.exitCode = passed ? 0 : 1;
 }
 
@@ -66,9 +69,13 @@ createInterface({ input: child.stdout }).on("line", line => {
 	} catch {
 		return;
 	}
-	const msg = (typeof ev.message === "object" && ev.message !== null ? ev.message : {}) as { role?: string; provider?: string; model?: string };
+	const msg = (typeof ev.message === "object" && ev.message !== null ? ev.message : {}) as { role?: string; provider?: string; model?: string; content?: unknown };
 	if (ev.type === "ready") send({ id: "p1", type: "prompt", message: "Reply with the single word: one" });
-	if (ev.type === "message_end" && msg.role === "assistant") models.push(`${msg.provider}/${msg.model}`);
+	if (ev.type === "message_end" && msg.role === "assistant") {
+		turnModel = `${msg.provider}/${msg.model}`;
+		const parts = Array.isArray(msg.content) ? (msg.content as { type?: string; name?: string; arguments?: unknown }[]) : [];
+		for (const p of parts) if (p.type === "toolCall" && p.name === "progress") progressCalls.push(p.arguments);
+	}
 	if (ev.type === "extension_ui_request" && ev.method === "notify" && String(ev.message).startsWith("[governor]")) {
 		notice ||= String(ev.message);
 		notices.push(String(ev.message));
@@ -76,6 +83,7 @@ createInterface({ input: child.stdout }).on("line", line => {
 	if (ev.type === "extension_ui_request" && /\[decaying-effort\] Manual override/.test(String(ev.message))) decayOverride = String(ev.message);
 	if (ev.type === "agent_end") {
 		agentEnds++;
+		models.push(turnModel);
 		// agent_end handlers run after the event is emitted; give the switch a moment to land.
 		const next = (message: string) => setTimeout(() => send({ id: `p${agentEnds + 1}`, type: "prompt", message }), 1500);
 		if (afkMode) {

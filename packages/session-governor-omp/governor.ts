@@ -24,6 +24,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Environment } from "@marcbachmann/cel-js";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { isRecord } from "./guards.ts";
+import { PROGRESS_DESCRIPTION, PROGRESS_STATUSES, PROGRESS_TOOL, progressReports, progressStats } from "./progress.ts";
 import { EPOCH_SHAPE, type ElideShape, emptyStats, type ForeignMode, type PruneStats, pruneBeforeCut, pruneForeignHistory } from "./prune.ts";
 
 export const ENTRY_TYPE = "session-governor";
@@ -82,6 +84,8 @@ export interface RuleVars {
 	agent: string;
 	afk: boolean;
 	turns_since_prune: bigint;
+	blocked_streak: bigint;
+	attempts_on_goal: bigint;
 }
 
 export interface ShiftState {
@@ -128,6 +132,8 @@ export const VARIABLES: ReadonlyArray<[keyof RuleVars, string, string]> = [
 	["agent", "string", "Agent kind: main | sub"],
 	["afk", "bool", "AFK mode engaged (agent-afk-omp `afk:changed`)"],
 	["turns_since_prune", "int", "User prompts since the last epoch cut (all prompts if none)"],
+	["blocked_streak", "int", "Agent `progress` reports of `blocked` in a row (reset by progress/done)"],
+	["attempts_on_goal", "int", "Agent `progress` reports since the last `done`, any status"],
 ];
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".omp", "governor.yml");
@@ -232,10 +238,6 @@ export function decide(env: Environment, rules: CompiledRule[], vars: RuleVars, 
 }
 
 // ---- metric readers over untyped session entries ----
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
-}
 
 function usageCost(usage: unknown): number {
 	if (!isRecord(usage) || !isRecord(usage.cost)) return 0;
@@ -381,7 +383,10 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		const model = ctx.model;
 		const prompts = userTimestamps(branch);
 		const cutTs = state.cut?.cutTs;
+		const progress = progressStats(progressReports(branch));
 		return {
+			blocked_streak: BigInt(progress.blocked_streak),
+			attempts_on_goal: BigInt(progress.attempts_on_goal),
 			turns_since_prune: BigInt(cutTs === undefined ? prompts.length : prompts.filter(t => t > cutTs).length),
 			cost: branchCost(branch),
 			tokens: BigInt(Math.round(usage?.tokens ?? 0)),
@@ -569,6 +574,26 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		return { messages };
 	});
 
+	// Agent self-report for stuck detection. Counters are derived from these calls in the branch (collectVars).
+	const T = pi.typebox.Type;
+	pi.registerTool({
+		name: PROGRESS_TOOL,
+		label: "Progress",
+		description: PROGRESS_DESCRIPTION,
+		loadMode: "essential",
+		approval: "read",
+		parameters: T.Object({
+			goal: T.String({ description: "The user's current goal, one line; same text while the goal is the same" }),
+			status: T.Enum([...PROGRESS_STATUSES], { description: "progress | blocked | done" }),
+			evidence: T.String({ description: "One raw output line that shows the status" }),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const s = progressStats(progressReports((ctx as unknown as SessionCtx).sessionManager?.getBranch?.() ?? []));
+			log("progress", { ...params, blocked_streak: s.blocked_streak, attempts_on_goal: s.attempts_on_goal });
+			return { content: [{ type: "text", text: `recorded: ${params.status}` }] };
+		},
+	});
+
 	pi.registerCommand("governor", {
 		description: "Show governor rules, live variables, and pruning; `reset` re-arms all rules, `reload` re-reads config",
 		handler: async (args, ctx) => {
@@ -587,7 +612,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 			const vars = collectVars(ctx as never);
 			const lines = [
 				`governor: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? `armed; model rules paused (manual /model)${state.effortPaused ? ", effort rules paused (manual effort)" : ""}` : state.effortPaused ? "armed; effort rules paused (manual effort)" : "armed"}`,
-				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune}`,
+				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune} blocked_streak=${vars.blocked_streak} attempts_on_goal=${vars.attempts_on_goal}`,
 				`prune: foreign=${config?.foreign ?? "elide"} cut=${state.cut ? `${new Date(state.cut.cutTs).toISOString()} (rule ${state.cut.rule})` : "none"}`,
 				lastPrune
 					? `last pruned request (${lastPrune.model}): ${lastPrune.charsBefore - lastPrune.charsAfter} chars saved (~${Math.round((lastPrune.charsBefore - lastPrune.charsAfter) / 4)} tokens est.), foreign elided=${lastPrune.elided} dropped=${lastPrune.dropped} kept=${lastPrune.kept}, epoch elided=${lastPrune.epochElided}`
