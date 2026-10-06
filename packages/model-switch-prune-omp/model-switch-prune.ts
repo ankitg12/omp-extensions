@@ -11,6 +11,7 @@
  * every request after a switch (only the first post-switch request is cache-cold).
  *
  * Config: ~/.omp/agent/model-switch-prune.json  { "mode": "elide"|"drop"|"keep", "debug": bool }
+ * Overrides: OMP_MODEL_SWITCH_PRUNE_CONFIG, OMP_MODEL_SWITCH_PRUNE_LOG (used by verify-live.ts).
  */
 import { appendFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -146,8 +147,8 @@ export function pruneForeignHistory(
 }
 
 export default function modelSwitchPrune(pi: ExtensionAPI, options: { configPath?: string; debugLogPath?: string } = {}): void {
-	const config = loadConfig(options.configPath);
-	const logPath = options.debugLogPath ?? DEBUG_LOG_PATH;
+	const config = loadConfig(options.configPath ?? process.env.OMP_MODEL_SWITCH_PRUNE_CONFIG ?? CONFIG_PATH);
+	const logPath = options.debugLogPath ?? process.env.OMP_MODEL_SWITCH_PRUNE_LOG ?? DEBUG_LOG_PATH;
 
 	pi.on("context", (event, ctx) => {
 		const model = ctx.model;
