@@ -17,6 +17,12 @@ Brings interactive learning, explanatory insights, and arbitrary user-defined ou
   - Emits educational `★ Insight` boxes highlighting codebase patterns and trade-offs.
 - **Explanatory Insights Mode (`/explanatory` or `/style explanatory`)**:
   - The agent completes the coding task directly while presenting educational `★ Insight` boxes explaining implementation choices.
+- **Manual Verification Mode (`/style manual`)**:
+  - The engineer runs the commands; the agent verifies state, flags mistakes, and keeps a PASS/FAIL/PENDING step ledger.
+- **Ledger Mode (`/style ledger`)**:
+  - The agent executes under normal confirmation rules and ends tool-work replies with the step ledger; settled PASS rows are folded.
+- **Socratic Mode (`/style socratic`)**:
+  - The agent asks guiding questions instead of giving the answer at once.
 - **Zero Inactive Cost (`/style-off`)**:
   - When disabled (`off`), no extra tokens are added to provider requests.
 - **Terminal Status Line Integration**:
