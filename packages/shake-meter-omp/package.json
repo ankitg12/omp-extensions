@@ -1,0 +1,12 @@
+{
+  "name": "@ankitg12/shake-meter-omp",
+  "version": "0.1.0",
+  "description": "OMP footer status: tokens a manual /shake would free now",
+  "type": "module",
+  "main": "shake-meter.ts",
+  "pi": {
+    "extensions": [
+      "./shake-meter.ts"
+    ]
+  }
+}

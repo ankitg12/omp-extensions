@@ -29,6 +29,7 @@ agents: [main]         # optional; agent kinds to act in (main | sub)
 
 # Epoch pruning shape (switch pruning is configured in model-switch-prune-omp)
 prune:
+  style: soft          # soft (head + tail, below) | aggressive (like /shake: >200 chars → marker, no head/tail)
   minChars: 2000       # elide results longer than this
   headChars: 600
   tailChars: 300
@@ -109,6 +110,8 @@ Wire pruning lowers the billed token count only. Native compaction triggers on `
 |---|---|---|
 | `turns_since_prune` | int | User prompts since the last epoch cut (or total turns if never pruned) |
 | `cost` | double | Session spend in USD (assistant + `task` subagent usage) |
+| `prunable` | int | Tokens a governor prune would free now (chars/4, using the configured `prune.style`) |
+| `shakeable` | int | Tokens a manual `/shake` would free now ([`shake-meter-omp`](../shake-meter-omp) estimate) |
 | `tokens` | int | Current context tokens reported by OMP |
 | `context_window` | int | Context window of the current model |
 | `context_pct` | double | Percentage of context window used (0–100) |

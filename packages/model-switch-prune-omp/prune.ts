@@ -63,7 +63,9 @@ export function elideText(text: string, shape: ElideShape, what: string): string
 	if (text.length <= shape.minChars) return text;
 	const dropped = text.length - shape.headChars - shape.tailChars;
 	if (dropped <= 0) return text;
-	return `${text.slice(0, shape.headChars)}\n[elided ${dropped} chars of ${what}; full output is in the session log]\n${text.slice(-shape.tailChars)}`;
+	// slice(-0) is the whole string, so a zero tail must be explicit.
+	const tail = shape.tailChars > 0 ? text.slice(-shape.tailChars) : "";
+	return `${text.slice(0, shape.headChars)}\n[elided ${dropped} chars of ${what}; full output is in the session log]\n${tail}`;
 }
 
 function isForeignToolTurn(message: AgentMessage, model: ModelProvenance): message is AssistantMessage {

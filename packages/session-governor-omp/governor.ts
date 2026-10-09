@@ -25,10 +25,18 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Environment } from "@marcbachmann/cel-js";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type Entry as ShakeEntry, estimateShake } from "../shake-meter-omp/estimate";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { isRecord } from "./guards.ts";
 import { progressReports, progressStats } from "../agent-progress-tool-omp/progress.ts";
 import { EPOCH_SHAPE, type ElideShape, emptyStats, type PruneStats, pruneBeforeCut } from "../model-switch-prune-omp/prune.ts";
+
+/**
+ * `prune.style: aggressive` — like `/shake`: replace each older tool result over 200 chars with a
+ * one-line marker, no head or tail. Wire-only, so the full result stays in the session file.
+ */
+export const AGGRESSIVE_EPOCH_SHAPE: ElideShape = { minChars: 200, headChars: 0, tailChars: 0 };
 
 export const ENTRY_TYPE = "session-governor";
 /** Entry type written by model-shift-omp before the merge; read for resume compatibility. */
@@ -84,6 +92,8 @@ export interface RuleVars {
 	agent: string;
 	afk: boolean;
 	turns_since_prune: bigint;
+	prunable: bigint;
+	shakeable: bigint;
 	blocked_streak: bigint;
 	attempts_on_goal: bigint;
 }
@@ -132,6 +142,8 @@ export const VARIABLES: ReadonlyArray<[keyof RuleVars, string, string]> = [
 	["agent", "string", "Agent kind: main | sub"],
 	["afk", "bool", "AFK mode engaged (agent-afk-omp `afk:changed`)"],
 	["turns_since_prune", "int", "User prompts since the last epoch cut (all prompts if none)"],
+	["prunable", "int", "Est. tokens a prune now would free (chars/4 of tool results before this exchange, beyond the current cut)"],
+	["shakeable", "int", "Est. tokens OMP's aggressive /shake would free now (same estimate as the shake-meter footer)"],
 	["blocked_streak", "int", "Agent `progress` reports of `blocked` in a row (reset by progress/done)"],
 	["attempts_on_goal", "int", "Agent `progress` reports since the last `done`, any status"],
 ];
@@ -157,7 +169,10 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 	if (prune.foreign !== undefined) {
 		throw new Error(`${path}: prune.foreign moved to model-switch-prune-omp (~/.omp/agent/model-switch-prune.json "mode"); remove it here`);
 	}
-	const epochShape = { ...EPOCH_SHAPE };
+	const style = prune.style ?? "soft";
+	if (style !== "soft" && style !== "aggressive") throw new Error(`${path}: prune.style must be 'soft' or 'aggressive'`);
+	// Explicit minChars/headChars/tailChars override the preset.
+	const epochShape = { ...(style === "aggressive" ? AGGRESSIVE_EPOCH_SHAPE : EPOCH_SHAPE) };
 	for (const key of ["minChars", "headChars", "tailChars"] as const) {
 		const v = prune[key];
 		if (v === undefined) continue;
@@ -173,7 +188,7 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 		rules: obj.rules as RuleConfig[],
 		logPath: typeof obj.logPath === "string" ? obj.logPath : DEFAULT_LOG_PATH,
 		epochShape,
-		debug: obj.debug === true,
+		debug: obj.debug === true || prune.debug === true,
 	};
 }
 
@@ -255,6 +270,27 @@ export function branchCost(branch: readonly unknown[]): number {
 		if (m.role === "toolResult" && m.toolName === "task" && isRecord(m.details)) spent += usageCost(m.details.usage);
 	}
 	return spent;
+}
+
+/**
+ * Estimated tokens a cut at `candidateCutTs` would free beyond what `currentCutTs` already frees.
+ * Same elision as the `context` hook, so the number is what `prune: true` would save on the wire.
+ * chars/4, like `/governor`'s saved-tokens line: an estimate, not a tokenizer count.
+ */
+export function prunableTokens(
+	messages: readonly AgentMessage[],
+	candidateCutTs: number | undefined,
+	currentCutTs: number | undefined,
+	shape: ElideShape = EPOCH_SHAPE,
+): number {
+	if (candidateCutTs === undefined || (currentCutTs !== undefined && candidateCutTs <= currentCutTs)) return 0;
+	const saved = (cutTs: number | undefined): number => {
+		if (cutTs === undefined) return 0;
+		const s = emptyStats();
+		pruneBeforeCut(messages as AgentMessage[], cutTs, shape, s);
+		return s.charsBefore - s.charsAfter;
+	};
+	return Math.max(0, Math.round((saved(candidateCutTs) - saved(currentCutTs)) / 4));
 }
 
 /** Timestamps of user prompts in branch order. */
@@ -347,6 +383,8 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	/** Stats of the most recent pruned request, for `/governor` and change-only debug logging. */
 	let lastPrune: (PruneStats & { model: string }) | undefined;
 	let lastPruneKey = "";
+	/** Most recent wire messages as the `context` hook received them, before this extension's pruning. */
+	let lastWire: readonly AgentMessage[] = [];
 
 	function log(event: string, details: Record<string, unknown> = {}): void {
 		const path = process.env.OMP_GOVERNOR_LOG ?? config?.logPath ?? DEFAULT_LOG_PATH;
@@ -384,7 +422,15 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		const prompts = userTimestamps(branch);
 		const cutTs = state.cut?.cutTs;
 		const progress = progressStats(progressReports(branch));
+		const candidateCut = prompts.filter(Number.isFinite).at(-1);
+		// Before the first request of a session there is no wire yet; the branch is the same history.
+		const wire =
+			lastWire.length > 0
+				? lastWire
+				: branch.flatMap(e => (e.type === "message" && e.message ? [e.message as AgentMessage] : []));
 		return {
+			prunable: BigInt(prunableTokens(wire, candidateCut, cutTs, config?.epochShape)),
+			shakeable: BigInt(estimateShake(branch as unknown as ShakeEntry[]).tokens),
 			blocked_streak: BigInt(progress.blocked_streak),
 			attempts_on_goal: BigInt(progress.attempts_on_goal),
 			turns_since_prune: BigInt(cutTs === undefined ? prompts.length : prompts.filter(t => t > cutTs).length),
@@ -417,6 +463,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		lastCtx = ctx;
 		afk = false;
 		onSession("switch", ctx as unknown as SessionCtx);
+		lastWire = [];
 	});
 
 	/** Queue an evaluation; returns when this one has finished. */
@@ -561,6 +608,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 
 	// Wire-only epoch pruning: only after a rule latched a cut. Runs in every agent kind.
 	pi.on("context", (event, ctx) => {
+		lastWire = event.messages;
 		if (!state.cut || (config && !config.enabled)) return;
 		const stats = emptyStats();
 		const messages = pruneBeforeCut(event.messages, state.cut.cutTs, config?.epochShape, stats);
@@ -590,7 +638,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 			const vars = collectVars(ctx as never);
 			const lines = [
 				`governor: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? `armed; model rules paused (manual /model)${state.effortPaused ? ", effort rules paused (manual effort)" : ""}` : state.effortPaused ? "armed; effort rules paused (manual effort)" : "armed"}`,
-				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune} blocked_streak=${vars.blocked_streak} attempts_on_goal=${vars.attempts_on_goal}`,
+				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune} prunable=${vars.prunable} blocked_streak=${vars.blocked_streak} attempts_on_goal=${vars.attempts_on_goal}`,
 				...(pi.getAllTools().some(t => t.name === "progress") ? [] : ["WARNING: no `progress` tool (load agent-progress-tool-omp); blocked_streak/attempts_on_goal stay 0, stuck rules cannot fire"]),
 				`prune: cut=${state.cut ? `${new Date(state.cut.cutTs).toISOString()} (rule ${state.cut.rule})` : "none"}`,
 				lastPrune

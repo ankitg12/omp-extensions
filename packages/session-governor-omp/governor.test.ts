@@ -10,7 +10,9 @@ import {
 	createEnvironment,
 	decide,
 	ENTRY_TYPE,
+	AGGRESSIVE_EPOCH_SHAPE,
 	loadConfig,
+	prunableTokens,
 	restoreState,
 	type RuleVars,
 	type ShiftState,
@@ -19,6 +21,8 @@ import {
 const env = createEnvironment();
 const vars = (over: Partial<RuleVars> = {}): RuleVars => ({
 	turns_since_prune: 3n,
+	prunable: 0n,
+	shakeable: 0n,
 	blocked_streak: 0n,
 	attempts_on_goal: 0n,
 	cost: 0.5,
@@ -33,6 +37,47 @@ const vars = (over: Partial<RuleVars> = {}): RuleVars => ({
 	...over,
 });
 const fresh = (): ShiftState => ({ fired: new Set(), paused: false });
+
+describe("prunable", () => {
+	const tr = (timestamp: number, chars: number) =>
+		({ role: "toolResult", timestamp, toolCallId: `t${timestamp}`, toolName: "read", content: [{ type: "text", text: "x".repeat(chars) }] }) as never;
+	// EPOCH_SHAPE keeps 900 chars of any result over 2000, plus a ~60-char marker.
+	const msgs = [tr(10, 40_000), tr(20, 1_000), tr(30, 40_000), tr(40, 40_000)];
+
+	test("counts only results older than the candidate cut", () => {
+		const t = prunableTokens(msgs, 35, undefined);
+		expect(t).toBeGreaterThan(19_000);
+		expect(t).toBeLessThan(20_000);
+	});
+	test("subtracts what the current cut already frees", () => {
+		expect(prunableTokens(msgs, 35, 15)).toBe(prunableTokens(msgs, 35, undefined) - prunableTokens(msgs, 15, undefined));
+	});
+	test("zero when the cut cannot advance or no prompt exists", () => {
+		expect(prunableTokens(msgs, 35, 35)).toBe(0);
+		expect(prunableTokens(msgs, undefined, undefined)).toBe(0);
+	});
+	test("aggressive shape frees nearly everything and keeps no tail", () => {
+		const soft = prunableTokens(msgs, 35, undefined);
+		const hard = prunableTokens(msgs, 35, undefined, AGGRESSIVE_EPOCH_SHAPE);
+		expect(hard).toBeGreaterThan(soft);
+		expect(hard).toBeGreaterThan(19_950);
+	});
+	test("prune.style loads presets and rejects unknown values", () => {
+		const dir = mkdtempSync(join(tmpdir(), "gov-style-"));
+		const p = join(dir, "g.yml");
+		writeFileSync(p, "prune:\n  style: aggressive\n  debug: true\nrules: []\n");
+		const c = loadConfig(p)!;
+		expect(c.epochShape).toEqual(AGGRESSIVE_EPOCH_SHAPE);
+		expect(c.debug).toBe(true);
+		writeFileSync(p, "prune:\n  style: brutal\nrules: []\n");
+		expect(() => loadConfig(p)).toThrow(/prune.style/);
+	});
+	test("rule on prunable compiles and decides prune", () => {
+		const r = compileRules(env, [{ name: "p", when: "prunable > 25000 && turns_since_prune >= 2", prune: true, repeat: true }]);
+		expect(decide(env, r, vars({ prunable: 24_000n }), fresh()).kind).toBe("none");
+		expect(decide(env, r, vars({ prunable: 26_000n }), fresh()).kind).not.toBe("none");
+	});
+});
 
 describe("compileRules", () => {
 	test("accepts int literal against double variable", () => {
