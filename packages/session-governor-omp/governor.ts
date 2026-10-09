@@ -220,6 +220,11 @@ export type Decision =
 	| { kind: "revert"; rule: string; to: string }
 	| { kind: "error"; rule: CompiledRule; message: string };
 
+/** A rule safe to fire mid-run (at `turn_end`): it only prunes, with no model or effort change. */
+export function isPruneOnly(rule: Pick<CompiledRule, "prune" | "use" | "effort">): boolean {
+	return rule.prune === true && rule.use === undefined && rule.effort === undefined;
+}
+
 function evaluateRule(env: Environment, rule: CompiledRule, vars: RuleVars): { ok: true; value: boolean } | { ok: false; message: string } {
 	try {
 		return { ok: true, value: env.evaluate(rule.when, vars as unknown as Record<string, unknown>) === true };
@@ -469,10 +474,16 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	});
 
 	/** Queue an evaluation; returns when this one has finished. */
-	function schedule(ctx: EvalCtx, trigger: string): Promise<void> {
-		chain = chain.then(() => evaluate(ctx, trigger)).catch(err => log("error", { trigger, message: String(err) }));
+	function schedule(ctx: EvalCtx, trigger: string, pruneOnly = false): Promise<void> {
+		chain = chain.then(() => evaluate(ctx, trigger, pruneOnly)).catch(err => log("error", { trigger, message: String(err) }));
 		return chain;
 	}
+
+	// Mid-run: only prune-only rules may fire here; model and effort changes wait for agent_end.
+	pi.on("turn_end", async (_e, ctx) => {
+		lastCtx = ctx;
+		await schedule(ctx, "turn_end", true);
+	});
 
 	pi.on("agent_end", async (_e, ctx) => {
 		lastCtx = ctx;
@@ -487,7 +498,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		if (lastCtx?.isIdle() && typeof data.waitUntil === "function") data.waitUntil(schedule(lastCtx, afk ? "afk-on" : "afk-off"));
 	});
 
-	async function evaluate(ctx: EvalCtx, trigger: string): Promise<void> {
+	async function evaluate(ctx: EvalCtx, trigger: string, pruneOnly = false): Promise<void> {
 		if (!config?.enabled || rules.length === 0) return;
 		if (!config.agents.includes(ctx.agent?.kind ?? "main")) return;
 
@@ -506,8 +517,9 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		}
 
 		const vars = collectVars(ctx);
-		const decision = decide(env, rules, vars, state);
-		if (decision.kind === "none") return;
+		const pool = pruneOnly ? rules.filter(isPruneOnly) : rules;
+		const decision = decide(env, pool, vars, state);
+		if (decision.kind === "none" || (pruneOnly && decision.kind === "revert")) return;
 		const snapshot = { trigger, cost: Number(vars.cost.toFixed(4)), tokens: Number(vars.tokens), turns: Number(vars.turns), afk };
 		const sessionBranch = (ctx as unknown as SessionCtx).sessionManager?.getBranch?.() ?? [];
 

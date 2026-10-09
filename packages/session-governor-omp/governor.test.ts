@@ -6,6 +6,7 @@ import {
 	branchCost,
 	branchTurns,
 	compileRules,
+	isPruneOnly,
 	configuredEffort,
 	createEnvironment,
 	decide,
@@ -76,6 +77,21 @@ describe("prunable", () => {
 		const r = compileRules(env, [{ name: "p", when: "prunable > 25000 && turns_since_prune >= 2", prune: true, repeat: true }]);
 		expect(decide(env, r, vars({ prunable: 24_000n }), fresh()).kind).toBe("none");
 		expect(decide(env, r, vars({ prunable: 26_000n }), fresh()).kind).not.toBe("none");
+	});
+});
+
+describe("isPruneOnly (turn_end filter)", () => {
+	test("prune-only rule may fire mid-run", () => {
+		const [r] = compileRules(env, [{ name: "p", when: "shakeable > 25000", prune: true, repeat: true }]);
+		expect(isPruneOnly(r)).toBe(true);
+	});
+	test("rules that switch model or effort wait for agent_end", () => {
+		const rs = compileRules(env, [
+			{ name: "m", when: "true", use: "x", prune: true },
+			{ name: "e", when: "true", effort: "low", prune: true },
+			{ name: "n", when: "true", use: "x" },
+		]);
+		expect(rs.map(isPruneOnly)).toEqual([false, false, false]);
 	});
 });
 

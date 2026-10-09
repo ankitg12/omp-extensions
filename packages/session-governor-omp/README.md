@@ -102,6 +102,8 @@ Sessions recorded by `model-shift-omp` are read too: a legacy `paused` entry res
 
 ### Native compaction
 
+**When rules run.** All rules run at `agent_end`. Prune-only rules (`prune: true`, no `use`, no `effort`) also run at every `turn_end`, so a long run is pruned mid-run instead of after it ends; model and effort changes never happen mid-run. The cut is still the last user prompt, so a mid-run prune frees earlier exchanges, not the current run's tool results (that needs OMP's real `/shake`, see can1357/oh-my-pi#5661).
+
 Wire pruning lowers the billed token count only. Native compaction triggers on `max(billed, stored)` and runs before extension `agent_end`, so it cannot be delayed by this extension. Keep native compaction on as the safety net and set its thresholds above the governor's prune thresholds.
 
 ### Rule Variables
