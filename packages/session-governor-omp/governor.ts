@@ -26,7 +26,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Environment } from "@marcbachmann/cel-js";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type Entry as ShakeEntry, estimateShake } from "../shake-meter-omp/estimate";
+import { loadShakeCore, previewShake } from "../shake-meter-omp/preview";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { isRecord } from "./guards.ts";
 import { progressReports, progressStats } from "../agent-progress-tool-omp/progress.ts";
@@ -143,7 +143,7 @@ export const VARIABLES: ReadonlyArray<[keyof RuleVars, string, string]> = [
 	["afk", "bool", "AFK mode engaged (agent-afk-omp `afk:changed`)"],
 	["turns_since_prune", "int", "User prompts since the last epoch cut (all prompts if none)"],
 	["prunable", "int", "Est. tokens a prune now would free (chars/4 of tool results before this exchange, beyond the current cut)"],
-	["shakeable", "int", "Est. tokens OMP's aggressive /shake would free now (same estimate as the shake-meter footer)"],
+	["shakeable", "int", "Tokens OMP's aggressive /shake would free now (OMP's own region finder + tokenizer; same number as the shake-meter footer)"],
 	["blocked_streak", "int", "Agent `progress` reports of `blocked` in a row (reset by progress/done)"],
 	["attempts_on_goal", "int", "Agent `progress` reports since the last `done`, any status"],
 ];
@@ -430,7 +430,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 				: branch.flatMap(e => (e.type === "message" && e.message ? [e.message as AgentMessage] : []));
 		return {
 			prunable: BigInt(prunableTokens(wire, candidateCut, cutTs, config?.epochShape)),
-			shakeable: BigInt(estimateShake(branch as unknown as ShakeEntry[]).tokens),
+			shakeable: BigInt(previewShake(branch, model).tokens),
 			blocked_streak: BigInt(progress.blocked_streak),
 			attempts_on_goal: BigInt(progress.attempts_on_goal),
 			turns_since_prune: BigInt(cutTs === undefined ? prompts.length : prompts.filter(t => t > cutTs).length),
@@ -454,7 +454,9 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		log("session", { reason, configPath, configured: !!config, rules: rules.length, loadError, fired: [...state.fired], paused: state.paused });
 	};
 
-	pi.on("session_start", (_e, ctx) => {
+	pi.on("session_start", async (_e, ctx) => {
+		const shakeErr = await loadShakeCore();
+		if (shakeErr) log("shake-core-fallback", { error: shakeErr });
 		lastCtx = ctx;
 		onSession("start", ctx as unknown as SessionCtx);
 		if (loadError) ctx.ui.notify(`[governor] Config rejected, engine disabled: ${loadError}`, "error");
