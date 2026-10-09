@@ -238,11 +238,25 @@ export default function agentSuggester(pi: ExtensionAPI) {
 		// Draft already captured in fire() before sendUserMessage.
 	});
 
-	// Restore the editor buffer once the nudge turn finishes.
+	// A submitted draft must not be restored later as if it were still unsent.
+	pi.on("input", (event) => {
+		if (savedDraft && event.text.includes(savedDraft.trim())) {
+			dbg(`editor draft dropped: user submitted it (${savedDraft.length} chars)`);
+			savedDraft = "";
+		}
+	});
+
+	// Restore the draft after the nudge turn, but never over text the user
+	// typed or dictated in the meantime.
 	pi.on("agent_end", (_event, ctx) => {
 		if (!savedDraft || !ctx.hasUI) return;
-		ctx.ui.setEditorText(savedDraft);
-		dbg(`editor draft restored (${savedDraft.length} chars)`);
+		const current = ctx.ui.getEditorText();
+		if (current.trim()) {
+			dbg(`editor draft restore skipped: editor has ${current.length} chars`);
+		} else {
+			ctx.ui.setEditorText(savedDraft);
+			dbg(`editor draft restored (${savedDraft.length} chars)`);
+		}
 		savedDraft = "";
 	});
 
