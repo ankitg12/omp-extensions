@@ -158,9 +158,16 @@ export default function agentAfk(pi: ExtensionAPI) {
 	}
 
 	function armSession(ctx: ExtensionContext): void {
+		clearInterval(checkTimer);
+		unsubscribeInput?.();
+		unsubscribeInput = undefined;
+		const kind = ctx.agent?.kind ?? "main";
+		if (!config.agents.includes(kind)) {
+			debug(`session not armed: agent kind '${kind}' not in agents [${config.agents.join(", ")}]`);
+			return;
+		}
 		lastInputAt = Date.now();
 		agentBusy = false;
-		unsubscribeInput?.();
 		unsubscribeInput = ctx.ui.onTerminalInput(() => {
 			lastInputAt = Date.now();
 			if (afkActive && autoEngaged) {
@@ -169,7 +176,6 @@ export default function agentAfk(pi: ExtensionAPI) {
 			}
 			return undefined; // observe only, never consume/replace input
 		});
-		clearInterval(checkTimer);
 		checkTimer = setInterval(() => checkInactivity(ctx), config.checkIntervalMs);
 		debug(`session armed (check every ${config.checkIntervalMs}ms, debounce ${config.debounceMs}ms)`);
 	}

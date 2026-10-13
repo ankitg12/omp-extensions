@@ -4,7 +4,8 @@
 // {
 //   "debounceMs": 120000,     // no terminal input for this long -> auto-engage (default 2min)
 //   "checkIntervalMs": 15000, // how often to check elapsed-since-last-input (default 15s)
-//   "debug": false
+//   "debug": false,
+//   "agents": ["main"]        // agent kinds (ctx.agent.kind) that arm AFK detection (default main only)
 // }
 
 import { readFileSync, existsSync } from "fs";
@@ -15,12 +16,14 @@ export interface AfkConfig {
 	debounceMs: number;
 	checkIntervalMs: number;
 	debug: boolean;
+	agents: string[];
 }
 
 const DEFAULT_CONFIG: AfkConfig = {
 	debounceMs: 120_000,
 	checkIntervalMs: 15_000,
 	debug: false,
+	agents: ["main"],
 };
 
 export function loadConfig(log: (msg: string) => void): AfkConfig {
@@ -33,6 +36,7 @@ export function loadConfig(log: (msg: string) => void): AfkConfig {
 			debounceMs: "debounceMs" in raw && typeof raw.debounceMs === "number" ? raw.debounceMs : DEFAULT_CONFIG.debounceMs,
 			checkIntervalMs: "checkIntervalMs" in raw && typeof raw.checkIntervalMs === "number" ? raw.checkIntervalMs : DEFAULT_CONFIG.checkIntervalMs,
 			debug: "debug" in raw && typeof raw.debug === "boolean" ? raw.debug : DEFAULT_CONFIG.debug,
+			agents: "agents" in raw && Array.isArray(raw.agents) ? raw.agents.map(String) : DEFAULT_CONFIG.agents,
 		};
 	} catch (e: unknown) {
 		log(`loadConfig: failed to parse ${path}: ${e instanceof Error ? e.message : String(e)}`);

@@ -50,6 +50,8 @@ interface SuggesterConfig {
 	/** Inline strings or ~/path (YAML frontmatter stripped). */
 	items: string[];
 	debug: boolean;
+	/** Agent kinds that arm the timer (`ctx.agent.kind`). Default: ["main"] — subagents stay quiet. */
+	agents: string[];
 }
 
 const DEFAULT_WRAP =
@@ -86,7 +88,8 @@ function loadConfig(log: (msg: string) => void): SuggesterConfig | null {
 			: DEFAULT_WRAP;
 		const debug = raw.debug === true;
 
-		return { intervalMs, clockAlign, picker, skipIfIdle, wrapWith, items: raw.items as string[], debug };
+		const agents = Array.isArray(raw.agents) ? raw.agents.map(String) : ["main"];
+		return { intervalMs, clockAlign, picker, skipIfIdle, wrapWith, items: raw.items as string[], debug, agents };
 	} catch (e: any) {
 		log(`config: parse error — ${e.message}`);
 		return null;
@@ -163,11 +166,13 @@ export default function agentSuggester(pi: ExtensionAPI) {
 	let nudgeJustFired = false;   // set in fire(); consumed in before_agent_start
 	let savedDraft = "";      // editor text stashed across the nudge turn
 	let cachedUI: any = null;    // UI ref so fire() can capture draft before sendUserMessage clears it
+	let active = false;          // set by session_start when ctx.agent.kind is in config.agents
 
 	// ── Scheduling ─────────────────────────────────────────────────────────────
 
 	function scheduleNext(): void {
 		if (timer) clearTimeout(timer);
+		if (!active) return;
 		let delay: number;
 		if (config.clockAlign) {
 			const boundary = nextBoundary(config.intervalMs);
@@ -274,7 +279,13 @@ export default function agentSuggester(pi: ExtensionAPI) {
 		lastTick = now;
 	}, SLEEP_POLL_MS);
 
-	pi.on("session_start", () => {
+	pi.on("session_start", (_event, ctx) => {
+		const kind = ctx.agent?.kind ?? "main";
+		active = config.agents.includes(kind);
+		if (!active) {
+			log(`session_start — agent kind '${kind}' not in agents [${config.agents.join(", ")}] — idle`);
+			return;
+		}
 		toolCallCount = 0;
 		rotationIndex = 0;
 		log("session_start — armed timer");
