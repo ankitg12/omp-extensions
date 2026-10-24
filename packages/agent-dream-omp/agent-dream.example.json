@@ -1,0 +1,12 @@
+{
+	"idleMs": 1800000,
+	"minIntervalMs": 43200000,
+	"diaryPath": "~/Notes/dreams/DREAMS.md",
+	"maxSessions": 10,
+	"maxDiaryEntries": 50,
+	"maxMemoriesPerPass": 20,
+	"maxDiaryEntryLines": 30,
+	"logPath": "~/.omp/agent/agent-dream.log",
+	"enabled": true,
+	"debug": false
+}
