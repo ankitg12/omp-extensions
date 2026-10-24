@@ -158,8 +158,7 @@ export default function agentDream(pi: ExtensionAPI) {
 		state.lastDiaryEntry = null;
 		state.totalPasses += 1;
 		saveState();
-		log(`pass #${state.totalPasses} injected (reason=${reason}) — state → ${STATE_PATH}`);
-		pi.sendUserMessage(buildDreamPrompt(config), { deliverAs: "followUp" });
+		pi.sendMessage({ customType: "dream-pass", content: buildDreamPrompt(config), display: true }, { triggerTurn: true, deliverAs: "nextTurn" });
 		ctx.ui.setStatus(STATUS_KEY, "");
 		touch();
 		armTimer(ctx);
