@@ -1,0 +1,37 @@
+#!/usr/bin/env bun
+// dream-diary — prepend a newest-first entry to DREAMS.md, trim beyond max.
+// Usage: dream-diary --diary <path> --max <n> --entry-file <path>
+//   entry-file: markdown body WITHOUT the ## heading (added automatically with now timestamp).
+// Prints the written entry timestamp (ISO) on success.
+
+const args = process.argv.slice(2);
+const opt = (name: string): string => {
+	const i = args.indexOf(name);
+	if (i < 0 || !args[i + 1]) {
+		console.error(`missing ${name} <value>`);
+		process.exit(2);
+	}
+	return args[i + 1];
+};
+
+import { homedir } from "node:os";
+function expand(p: string): string {
+	return p.replace(/^~(?=$|\/)/, homedir());
+}
+
+const diaryPath = expand(opt("--diary"));
+const max = Math.max(1, parseInt(opt("--max"), 10) || 50);
+const entryBody = (await Bun.file(opt("--entry-file")).text()).trimEnd() + "\n";
+const now = new Date();
+const iso = now.toISOString().slice(0, 16);
+const entry = `## ${iso}\n${entryBody}\n`;
+
+const f = Bun.file(diaryPath);
+let existing = (await f.exists()) ? await f.text() : "";
+// split existing into entries on ## headings; keep newest-first order
+const parts = existing.split(/^## /m);
+const head = parts[0]?.trim() === "" ? [] : [parts[0]];
+const entries = parts.slice(1).map((p) => `## ${p}`.trimEnd());
+const kept = [entry.trimEnd(), ...entries].slice(0, max);
+await Bun.write(diaryPath, kept.join("\n\n") + "\n");
+console.log(iso);

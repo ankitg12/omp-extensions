@@ -24,6 +24,10 @@ export interface DreamConfig {
 	maxDiaryEntryLines: number;
 	/** Log file. Default ~/.omp/agent/agent-dream.log. */
 	logPath: string;
+	/** Per-project memory file appended on consolidation. Empty = diary only. Default "". */
+	memoryFile: string;
+	/** Where the skill writes its report JSON. Default ~/.omp/agent/agent-dream-report.json. */
+	reportPath: string;
 	/** Master switch. Default true. */
 	enabled: boolean;
 	/** Log arming/cooldown decisions to the log file. Default false. */
@@ -46,6 +50,8 @@ export const DEFAULT_CONFIG: DreamConfig = {
 	maxMemoriesPerPass: 20,
 	maxDiaryEntryLines: 30,
 	logPath: "~/.omp/agent/agent-dream.log",
+	memoryFile: "",
+	reportPath: "~/.omp/agent/agent-dream-report.json",
 	enabled: true,
 	debug: false,
 };
@@ -74,7 +80,10 @@ export function parseConfig(raw: unknown): DreamConfig {
 	const lines = positiveInt(o.maxDiaryEntryLines);
 	if (lines !== null) cfg.maxDiaryEntryLines = lines;
 	if (typeof o.logPath === "string" && o.logPath.length > 0) cfg.logPath = o.logPath;
+	if (typeof o.memoryFile === "string") cfg.memoryFile = o.memoryFile;
+	if (typeof o.reportPath === "string" && o.reportPath.length > 0) cfg.reportPath = o.reportPath;
 	if (typeof o.enabled === "boolean") cfg.enabled = o.enabled;
+	if (typeof o.debug === "boolean") cfg.debug = o.debug;
 	return cfg;
 }
 
@@ -135,6 +144,37 @@ export function loadDreamState(log: (msg: string) => void = () => {}): DreamStat
 		log(`dream state unreadable (${e instanceof Error ? e.message : String(e)}) — starting fresh`);
 		return { ...EMPTY_STATE };
 	}
+}
+
+export interface DreamReport {
+	sessions: number;
+	memories: number;
+	diaryEntry: string | null;
+	at: string;
+}
+
+/** Read the skill's report JSON. Null when missing/unreadable/invalid. */
+export function readDreamReport(reportPath: string, log: (msg: string) => void = () => {}): DreamReport | null {
+	try {
+		if (!existsSync(reportPath)) return null;
+		const raw = JSON.parse(readFileSync(reportPath, "utf8")) as Record<string, unknown>;
+		if (typeof raw.sessions !== "number" || typeof raw.memories !== "number" || typeof raw.at !== "string") return null;
+		return {
+			sessions: Math.floor(raw.sessions),
+			memories: Math.floor(raw.memories),
+			diaryEntry: typeof raw.diaryEntry === "string" && raw.diaryEntry.length > 0 ? raw.diaryEntry : null,
+			at: raw.at,
+		};
+	} catch (e) {
+		log(`dream report unreadable (${e instanceof Error ? e.message : String(e)})`);
+		return null;
+	}
+}
+
+/** Fold a skill report into state (no-op when the report predates the last injection). */
+export function applyDreamReport(state: DreamState, report: DreamReport): DreamState {
+	if (state.lastPassAt !== null && report.at < state.lastPassAt) return state;
+	return { ...state, lastSessions: report.sessions, lastMemories: report.memories, lastDiaryEntry: report.diaryEntry };
 }
 
 export function humanSince(iso: string | null, now: number = Date.now()): string {

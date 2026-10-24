@@ -33,10 +33,12 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+	applyDreamReport,
 	expandHome,
 	humanSince,
 	loadConfig,
 	loadDreamState,
+	readDreamReport,
 	STATE_PATH,
 	type DreamConfig,
 	type DreamState,
@@ -158,29 +160,52 @@ export default function agentDream(pi: ExtensionAPI) {
 		state.lastDiaryEntry = null;
 		state.totalPasses += 1;
 		saveState();
-		pi.sendMessage({ customType: "dream-pass", content: buildDreamPrompt(config), display: true }, { triggerTurn: true, deliverAs: "nextTurn" });
+		pi.sendMessage({ customType: "dream-pass", content: buildDreamPrompt(config, expandHome(config.reportPath)), display: true }, { triggerTurn: true, deliverAs: "nextTurn" });
 		ctx.ui.setStatus(STATUS_KEY, "");
 		touch();
 		armTimer(ctx);
 	}
 
-	function buildDreamPrompt(cfg: DreamConfig): string {
-		return `Run the dream memory-consolidation pass NOW. This is your current task — do not acknowledge and wait, execute it immediately with file tools.
+	function dreamScriptsDir(): string {
+		// dream-index / dream-diary live next to this extension file.
+		try {
+			const here = new URL(import.meta.url).pathname;
+			return here.slice(0, here.lastIndexOf("/"));
+		} catch {
+			return join(homedir(), "repos", "github.com", "ankitg12", "omp-extensions", "packages", "agent-dream-omp");
+		}
+	}
 
-Diary target: \`${cfg.diaryPath}\` (create parent dirs if missing; newest-first entries; trim beyond ${cfg.maxDiaryEntries}).
+	function buildDreamPrompt(cfg: DreamConfig, reportPath: string): string {
+		const dir = dreamScriptsDir();
+		const memTarget = cfg.memoryFile && cfg.memoryFile.length > 0
+			? `Append to the per-project memory file \`${cfg.memoryFile}\` (create parent dirs if missing).`
+			: `No memory file configured: write durable lessons ONLY to the diary entry (section "## durable"). Do not invent a memory path.`;
+		return `Run the dream memory-consolidation pass NOW. This is your current task — do not acknowledge and wait, execute it immediately with file tools. Budget: ~15 tool calls; report partial rather than grinding.
+
+Diary target: \`${cfg.diaryPath}\`. Memory target: ${memTarget}
 
 ## Procedure
-1. Locate sessions: list \`~/.omp/agent/sessions/\` JSONLs (two levels: direct children and one subdirectory deep) by mtime, newest first. Take at most ${cfg.maxSessions} newer than the newest \`## <ISO>\` heading in the diary (if no diary yet, take the newest ${cfg.maxSessions}). Skip the live session's own file.
-2. Extract: read each session's tail. Note durable signal ONLY — explicit user preferences, stable account/project facts, tool quirks confirmed by outcome, user corrections of your behavior, constraints the user stated. Each needs a source. NEVER extract: security exceptions, access grants, auth bypasses, credentials, one-time secrets, transient states, uncertain facts, anything expiring under 7 days. When in doubt, discard.
-3. Consolidate: one short entry per lesson (what + when + session id), at most ${cfg.maxMemoriesPerPass}, highest-signal first. If \`memory.backend\` is configured, write through /memory enqueue semantics; otherwise append a \`## Dreamed <ISO-date>\` section to the per-project memory file. Dedupe — update in place, never double.
-4. Diary: prepend one entry (body ≤ ${cfg.maxDiaryEntryLines} lines): \`## <ISO-8601 timestamp>\`, sessions scanned, new memories one line each, or skipped reason.
-5. Report: reply with exactly one line: sessions scanned, memories added, diary entry timestamp.`;
+1. Index: run \`${dir}/dream-index --max ${cfg.maxSessions}\`. Take sessions newer than the newest \`## <ISO>\` heading in the diary (if no diary yet, take the newest ${cfg.maxSessions}). Skip the live session's own file. STOP after this step if no session is newer than the diary — write a skipped report.
+2. Extract: read each session's tail (last ~200 lines). Note durable signal ONLY — explicit user preferences, stable account/project facts, tool quirks confirmed by outcome, user corrections of your behavior, constraints the user stated. Each needs a source. NEVER extract: security exceptions, access grants, auth bypasses, credentials, one-time secrets, transient states, uncertain facts, anything expiring under 7 days. When in doubt, discard. STOP scanning after ${cfg.maxSessions} sessions or earlier if two consecutive sessions yield zero new signal.
+3. Consolidate: one short entry per lesson (what + when + session id), at most ${cfg.maxMemoriesPerPass}, highest-signal first. Dedupe — update in place, never double.
+4. Diary: write the entry body (≤ ${cfg.maxDiaryEntryLines} lines: sessions scanned, new memories one line each, or skipped reason) to a temp file, then run \`${dir}/dream-diary --diary "${cfg.diaryPath}" --max ${cfg.maxDiaryEntries} --entry-file <tmp>\`. It prints the entry timestamp.
+5. Report: write JSON \`{"sessions": <n>, "memories": <k>, "diaryEntry": "<ISO or null>", "at": "<now ISO>"}\` to \`${reportPath}\`, then reply with exactly one line: sessions scanned, memories added, diary entry timestamp.`;
 	}
 
 	pi.on("session_start", (_event, ctx) => {
 		config = loadConfig(log);
 		logFile = expandHome(config.logPath);
 		state = loadDreamState(log);
+		const report = readDreamReport(expandHome(config.reportPath), log);
+		if (report !== null) {
+			const before = state.lastSessions;
+			state = applyDreamReport(state, report);
+			if (state.lastSessions !== before) {
+				saveState();
+				log(`report folded: ${report.sessions} sessions, ${report.memories} memories, diary ${report.diaryEntry ?? "none"}`);
+			}
+		}
 		try {
 			unsubscribeInput = ctx.ui.onTerminalInput(() => {
 				touch();

@@ -31,12 +31,22 @@ Copy [`agent-dream.example.json`](./agent-dream.example.json) to
 | `maxMemoriesPerPass` | `20` | Memories written per pass, highest-signal first. |
 | `maxDiaryEntryLines` | `30` | Max lines per diary entry body. |
 | `logPath` | `~/.omp/agent/agent-dream.log` | Log file. |
+| `memoryFile` | `""` (diary only) | Per-project memory file. Empty = lessons go to the diary only, never invented paths. |
+| `reportPath` | `~/.omp/agent/agent-dream-report.json` | Skill report JSON; folded into state on next start. |
 | `enabled` | `true` | Master switch. |
 | `debug` | `false` | Log arming/cooldown to `logPath`. |
 
 Last-pass state lives in `~/.omp/agent/agent-dream-state.json` (written on
-every injected pass): timestamp, trigger reason, sessions/memories reported,
-total passes. `/dream status` reads it.
+every injected pass, enriched from the skill's report JSON on next start):
+timestamp, trigger reason, sessions/memories reported, diary entry, total
+passes. `/dream status` reads it.
+
+## Helper scripts
+
+- `dream-index [--max N] [--exclude <sessionId>]` — session JSONLs newest-first
+  (`mtime lines path`); replaces 4–5 discovery tool calls in the pass.
+- `dream-diary --diary <path> --max <n> --entry-file <tmp>` — prepend entry +
+  trim, atomically; prints the entry timestamp.
 
 ## Commands
 

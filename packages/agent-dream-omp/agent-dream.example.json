@@ -7,6 +7,8 @@
 	"maxMemoriesPerPass": 20,
 	"maxDiaryEntryLines": 30,
 	"logPath": "~/.omp/agent/agent-dream.log",
+	"memoryFile": "",
+	"reportPath": "~/.omp/agent/agent-dream-report.json",
 	"enabled": true,
 	"debug": false
 }

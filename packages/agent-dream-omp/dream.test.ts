@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_CONFIG, cooldownElapsed, EMPTY_STATE, humanSince, newestEntryTimestamp, parseConfig, parseState } from "./dream-state";
+import { applyDreamReport, DEFAULT_CONFIG, cooldownElapsed, EMPTY_STATE, humanSince, newestEntryTimestamp, parseConfig, parseState, readDreamReport } from "./dream-state";
 
 describe("parseConfig", () => {
 	test("defaults on missing/garbage", () => {
@@ -88,5 +88,28 @@ describe("humanSince", () => {
 		expect(humanSince(new Date(now - 3 * 3600000).toISOString(), now)).toBe("3h ago");
 		expect(humanSince(new Date(now - 4 * 86400000).toISOString(), now)).toBe("4d ago");
 		expect(humanSince("garbage", now)).toBe("unknown");
+	});
+});
+
+describe("report contract", () => {
+	test("applyDreamReport folds newer reports, ignores stale", () => {
+		const base = { ...EMPTY_STATE, lastPassAt: "2026-10-24T10:00:00.000Z", totalPasses: 1 };
+		const fresh = applyDreamReport(base, { sessions: 3, memories: 2, diaryEntry: "2026-10-24T10:05", at: "2026-10-24T10:05:00.000Z" });
+		expect(fresh.lastSessions).toBe(3);
+		expect(fresh.lastMemories).toBe(2);
+		expect(fresh.lastDiaryEntry).toBe("2026-10-24T10:05");
+		const stale = applyDreamReport(base, { sessions: 9, memories: 9, diaryEntry: "x", at: "2026-10-24T09:00:00.000Z" });
+		expect(stale).toEqual(base);
+	});
+
+	test("readDreamReport rejects invalid shapes", () => {
+		expect(readDreamReport("/nonexistent/path.json")).toBeNull();
+	});
+
+	test("new config fields parse", () => {
+		const cfg = parseConfig({ memoryFile: "~/m.md", reportPath: "~/r.json" });
+		expect(cfg.memoryFile).toBe("~/m.md");
+		expect(cfg.reportPath).toBe("~/r.json");
+		expect(parseConfig({}).memoryFile).toBe("");
 	});
 });
