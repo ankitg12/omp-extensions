@@ -144,6 +144,7 @@ export default function agentDream(pi: ExtensionAPI) {
 			return;
 		}
 		if (!config.enabled) {
+			log("pass skipped — enabled=false in agent-dream.json");
 			ctx.ui.notify("[dream] disabled in config — pass skipped", "info");
 			return;
 		}
