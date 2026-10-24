@@ -43,9 +43,9 @@ import {
 	type DreamConfig,
 	type DreamState,
 } from "./dream-state.ts";
-
 export const AFK_CHANNEL = "afk:changed";
 const STATUS_KEY = "dream";
+// Idle-timer handle from ctx.setTimeout; cleared via ctx.clearTimer.
 const DEFAULT_LOG_FILE = join(homedir(), ".omp", "agent", "agent-dream.log");
 let logFile = DEFAULT_LOG_FILE;
 export function logFilePath(): string {
@@ -66,7 +66,7 @@ export default function agentDream(pi: ExtensionAPI) {
 	let config: DreamConfig = loadConfig(log);
 	let state: DreamState = loadDreamState(log);
 	let lastActivityAt = Date.now();
-	let idleTimer: NodeJS.Timeout | undefined;
+	let idleTimer: Parameters<ExtensionContext["clearTimer"]>[0] | undefined;
 	let unsubscribeInput: (() => void) | undefined;
 
 	function saveState(): void {
@@ -77,13 +77,13 @@ export default function agentDream(pi: ExtensionAPI) {
 		}
 	}
 
-	// Raw timers, same as agent-afk/session-reminder: re-armed on every turn,
-	// cleared on session_shutdown. Docs describe ctx.setTimeout/clearTimer but
-	// the installed SDK (16.1.16) types ExtensionContext without them.
+// Managed timers (ctx.setTimeout/clearTimer, SDK >=17.0.2): unref'd, throws
+// contained via the extension error channel, auto-cleared on shutdown.
+// The clear() in armTimer + session_shutdown is belt-and-braces.
 	function armTimer(ctx: ExtensionContext): void {
-		clear();
+		clear(ctx);
 		try {
-			idleTimer = setTimeout(() => {
+			idleTimer = ctx.setTimeout(() => {
 				try {
 					onIdleTimeout(ctx);
 				} catch (e) {
@@ -96,9 +96,13 @@ export default function agentDream(pi: ExtensionAPI) {
 		}
 	}
 
-	function clear(): void {
+	function clear(ctx?: ExtensionContext): void {
 		if (idleTimer !== undefined) {
-			clearTimeout(idleTimer);
+			try {
+				if (ctx !== undefined) ctx.clearTimer(idleTimer);
+			} catch {
+				// already fired or session tearing down — ignore
+			}
 			idleTimer = undefined;
 		}
 	}
@@ -218,12 +222,13 @@ Diary target: \`${cfg.diaryPath}\`. Memory target: ${memTarget}
 		armTimer(ctx);
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (_event, ctx) => {
 		try {
 			unsubscribeInput?.();
 		} catch {
 			// ignore
 		}
+		clear(ctx);
 	});
 
 	// Any completed turn means activity: reset the idle clock.
