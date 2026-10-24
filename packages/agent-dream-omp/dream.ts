@@ -159,14 +159,23 @@ export default function agentDream(pi: ExtensionAPI) {
 		state.totalPasses += 1;
 		saveState();
 		log(`pass #${state.totalPasses} injected (reason=${reason}) — state → ${STATE_PATH}`);
-		pi.sendUserMessage(buildDreamPrompt(config.diaryPath), { deliverAs: "followUp" });
+		pi.sendUserMessage(buildDreamPrompt(config), { deliverAs: "followUp" });
 		ctx.ui.setStatus(STATUS_KEY, "");
 		touch();
 		armTimer(ctx);
 	}
 
-	function buildDreamPrompt(diaryPath: string): string {
-		return `Run the dream skill pass now. Read the procedure at skill://dream/SKILL.md (bundled with the agent-dream extension) and follow it. Diary target: \`${diaryPath}\`. When done, reply with one line: sessions scanned, memories added, diary entry timestamp.`;
+	function buildDreamPrompt(cfg: DreamConfig): string {
+		return `Run the dream memory-consolidation pass NOW. This is your current task — do not acknowledge and wait, execute it immediately with file tools.
+
+Diary target: \`${cfg.diaryPath}\` (create parent dirs if missing; newest-first entries; trim beyond ${cfg.maxDiaryEntries}).
+
+## Procedure
+1. Locate sessions: list \`~/.omp/agent/sessions/\` JSONLs (two levels: direct children and one subdirectory deep) by mtime, newest first. Take at most ${cfg.maxSessions} newer than the newest \`## <ISO>\` heading in the diary (if no diary yet, take the newest ${cfg.maxSessions}). Skip the live session's own file.
+2. Extract: read each session's tail. Note durable signal ONLY — explicit user preferences, stable account/project facts, tool quirks confirmed by outcome, user corrections of your behavior, constraints the user stated. Each needs a source. NEVER extract: security exceptions, access grants, auth bypasses, credentials, one-time secrets, transient states, uncertain facts, anything expiring under 7 days. When in doubt, discard.
+3. Consolidate: one short entry per lesson (what + when + session id), at most ${cfg.maxMemoriesPerPass}, highest-signal first. If \`memory.backend\` is configured, write through /memory enqueue semantics; otherwise append a \`## Dreamed <ISO-date>\` section to the per-project memory file. Dedupe — update in place, never double.
+4. Diary: prepend one entry (body ≤ ${cfg.maxDiaryEntryLines} lines): \`## <ISO-8601 timestamp>\`, sessions scanned, new memories one line each, or skipped reason.
+5. Report: reply with exactly one line: sessions scanned, memories added, diary entry timestamp.`;
 	}
 
 	pi.on("session_start", (_event, ctx) => {
