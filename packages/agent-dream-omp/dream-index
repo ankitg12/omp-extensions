@@ -1,0 +1,59 @@
+#!/usr/bin/env bun
+// dream-index — list session JSONLs newest-first for the dream pass.
+// Usage: dream-index [--max N] [--exclude <sessionId>] [--json]
+// Prints: <mtime-epoch> <lines> <path> (newest first), two levels deep.
+// Excludes the live session via --exclude (session id substring match).
+
+const args = process.argv.slice(2);
+let max = 10;
+let exclude = "";
+let asJson = false;
+for (let i = 0; i < args.length; i++) {
+	if (args[i] === "--max" && args[i + 1]) max = Math.max(1, parseInt(args[++i], 10) || 10);
+	else if (args[i] === "--exclude" && args[i + 1]) exclude = args[++i];
+	else if (args[i] === "--json") asJson = true;
+}
+
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { Glob } from "bun";
+
+const sessDir = join(homedir(), ".omp", "agent", "sessions");
+const glob = new Glob("*.jsonl");
+const glob1 = new Glob("*/*.jsonl");
+
+interface Row { mtime: number; lines: number; path: string; }
+const rows: Row[] = [];
+const seen = new Set<string>();
+
+async function collect(pattern: Glob) {
+	for await (const rel of pattern.scan({ cwd: sessDir, absolute: false, onlyFiles: true })) {
+		if (seen.has(rel)) continue;
+		seen.add(rel);
+		const full = join(sessDir, rel);
+		if (exclude && full.includes(exclude)) continue;
+		const f = Bun.file(full);
+		if (!(await f.exists())) continue;
+		rows.push({ mtime: Math.floor((f.lastModified ?? 0) / 1000), lines: 0, path: full });
+	}
+}
+await collect(glob);
+await collect(glob1);
+
+// line counts only for the newest 3x max (cheap enough, avoids full-tree reads)
+rows.sort((a, b) => b.mtime - a.mtime);
+const shortlist = rows.slice(0, max * 3);
+for (const r of shortlist) {
+	try {
+		const text = await Bun.file(r.path).text();
+		r.lines = text === "" ? 0 : text.split("\n").length;
+	} catch {
+		r.lines = -1;
+	}
+}
+const out = shortlist.slice(0, max);
+if (asJson) {
+	console.log(JSON.stringify(out, null, 2));
+} else {
+	for (const r of out) console.log(`${r.mtime} ${r.lines} ${r.path}`);
+}

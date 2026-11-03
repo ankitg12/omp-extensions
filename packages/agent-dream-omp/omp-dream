@@ -1,0 +1,44 @@
+#!/bin/bash
+# omp-dream — headless memory-consolidation pass for cron/launchd.
+# Runs the dream skill procedure in a fresh ephemeral OMP session (no TUI,
+# no session files), so cron never needs a live session or gateway open.
+#
+# Usage: omp-dream [--dry-run] [--model <spec>]
+# Reads ~/.omp/agent/agent-dream.json (same config as the extension).
+set -euo pipefail
+
+DRY_RUN=0
+MODEL_ARGS=()
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--dry-run) DRY_RUN=1; shift ;;
+		--model) MODEL_ARGS=(--model "$2"); shift 2 ;;
+		*) echo "usage: omp-dream [--dry-run] [--model <spec>]" >&2; exit 2 ;;
+	esac
+done
+
+CFG="$HOME/.omp/agent/agent-dream.json"
+DIARY="$HOME/Notes/dreams/DREAMS.md"
+MAX_SESSIONS=10
+MAX_DIARY_ENTRIES=50
+MAX_MEMORIES=20
+if [ -f "$CFG" ]; then
+	DIARY=$(python3 -c "import json;print(json.load(open('$CFG')).get('diaryPath','$DIARY'))")
+	MAX_SESSIONS=$(python3 -c "import json;print(json.load(open('$CFG')).get('maxSessions',10))")
+	MAX_DIARY_ENTRIES=$(python3 -c "import json;c=json.load(open('$CFG'));print(c.get('maxDiaryEntries',c.get('maxEntries',50)))")
+	MAX_MEMORIES=$(python3 -c "import json;print(json.load(open('$CFG')).get('maxMemoriesPerPass',20))")
+fi
+# expand leading ~ without eval
+case "$DIARY" in "~"*) DIARY="$HOME${DIARY#\~}";; esac
+
+if [ "$DRY_RUN" = 1 ]; then
+	echo "diary: $DIARY"
+	echo "maxSessions: $MAX_SESSIONS maxDiaryEntries: $MAX_DIARY_ENTRIES maxMemoriesPerPass: $MAX_MEMORIES"
+	echo "sessions newer than diary head (newest first):"
+	ls -t "$HOME"/.omp/agent/sessions/*/*.jsonl "$HOME"/.omp/agent/sessions/*.jsonl 2>/dev/null | head -n "$MAX_SESSIONS" || true
+	exit 0
+fi
+
+PROMPT="You are running the dream skill pass headlessly. Read the procedure at skill://dream/SKILL.md (bundled with the agent-dream extension; if unavailable, use this fallback: scan up to $MAX_SESSIONS newest session JSONLs under ~/.omp/agent/sessions/ newer than the newest '## <ISO>' heading in the diary; extract durable lessons/decisions/corrections (at most $MAX_MEMORIES, highest-signal first); dedupe against MEMORY.md; prepend one newest-first entry to the diary; trim beyond $MAX_DIARY_ENTRIES). Diary target: \`$DIARY\`. When done, reply with one line: sessions scanned, memories added, diary entry timestamp."
+
+exec omp -p --no-session --max-time 15m "${MODEL_ARGS[@]}" "$PROMPT"

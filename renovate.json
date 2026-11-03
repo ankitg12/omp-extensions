@@ -1,0 +1,12 @@
+{
+	"$schema": "https://docs.renovatebot.com/renovate-schema.json",
+	"extends": ["config:recommended"],
+	"packageRules": [
+		{
+			"matchPackageNames": ["@oh-my-pi/pi-coding-agent"],
+			"groupName": "pi SDK",
+			"schedule": ["before 6am on monday"],
+			"labels": ["dependencies", "sdk"]
+		}
+	]
+}
