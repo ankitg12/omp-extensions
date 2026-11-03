@@ -19,6 +19,26 @@ Why policy-driven pruning is in the governor:
 - If a rule switches the model and prunes at the same turn boundary, you pay for **one cold cache read**, not two.
 - Pruning uses a **latched cut point** (`cutTs`), so earlier tool outputs are elided while maintaining byte-level prefix stability across subsequent requests.
 
+## Model-specific instructions
+
+The governor can append a trusted instruction file for the main agent's current model. Add an exact
+`provider/model-id` mapping to `~/.omp/governor.yml`:
+
+```yaml
+modelInstructions:
+  amd-claude/claude-opus-5.5: ~/.omp/model-instructions/opus.md
+  amd-gpt/gpt-6.1-sol: ~/.omp/model-instructions/sol.md
+```
+
+The file is read at each user prompt; a model switch selects the new file at the next prompt.
+Paths starting with `~/` use the home directory; relative paths resolve against the config file's
+directory. Unmapped models add nothing. A missing, unreadable, or empty file produces a warning and
+leaves the prompt unchanged. Instructions append to the existing prompt; they do not replace shared
+context or safety rules. Only put trusted text in these files. The feature is main-agent only and
+is disabled when the governor is disabled. Use `/governor reload` after editing the mapping; file
+content changes are picked up on the next prompt. Model switches during tool-only continuations do
+not update the instructions until the next user prompt.
+
 ## Config
 
 The rules file is `~/.omp/governor.yml` (fallback env: `OMP_GOVERNOR_CONFIG`). If missing, the governor is inert.

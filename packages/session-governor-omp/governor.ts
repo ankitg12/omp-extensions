@@ -23,7 +23,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { Environment } from "@marcbachmann/cel-js";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { loadShakeCore, previewShake } from "../shake-meter-omp/preview";
@@ -68,6 +68,8 @@ export interface ShiftConfig {
 	epochShape: ElideShape;
 	/** Log per-request prune stats when they change. */
 	debug: boolean;
+	/** Exact provider/model selectors mapped to trusted instruction files. */
+	modelInstructions: Record<string, string>;
 }
 
 export interface CompiledRule {
@@ -165,6 +167,15 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 	if (!raw || typeof raw !== "object") throw new Error(`${path}: expected a mapping at top level`);
 	const obj = raw as Record<string, unknown>;
 	if (!Array.isArray(obj.rules)) throw new Error(`${path}: 'rules' must be a list`);
+	if (obj.modelInstructions !== undefined && (!isRecord(obj.modelInstructions) || Object.values(obj.modelInstructions).some(v => typeof v !== "string" || !v.trim()))) {
+		throw new Error(`${path}: 'modelInstructions' must map provider/model selectors to non-empty file paths`);
+	}
+	const modelInstructions: Record<string, string> = {};
+	for (const [model, file] of Object.entries((obj.modelInstructions ?? {}) as Record<string, string>)) {
+		if (!model.includes("/") || model.startsWith("/") || model.endsWith("/")) throw new Error(`${path}: invalid modelInstructions selector '${model}'`);
+		const expanded = file === "~" ? homedir() : file.startsWith("~/") ? join(homedir(), file.slice(2)) : file;
+		modelInstructions[model] = isAbsolute(expanded) ? expanded : resolve(dirname(path), expanded);
+	}
 	const prune = (obj.prune && typeof obj.prune === "object" ? obj.prune : {}) as Record<string, unknown>;
 	if (prune.foreign !== undefined) {
 		throw new Error(`${path}: prune.foreign moved to model-switch-prune-omp (~/.omp/agent/model-switch-prune.json "mode"); remove it here`);
@@ -189,6 +200,7 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 		logPath: typeof obj.logPath === "string" ? obj.logPath : DEFAULT_LOG_PATH,
 		epochShape,
 		debug: obj.debug === true || prune.debug === true,
+		modelInstructions,
 	};
 }
 
@@ -471,6 +483,26 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		afk = false;
 		onSession("switch", ctx as unknown as SessionCtx);
 		lastWire = [];
+	});
+
+	// Select on every user prompt so manual and governor model switches use the new file.
+	// Preserve the incoming prompt (including earlier extensions); never replace common policy.
+	pi.on("before_agent_start", (event, ctx) => {
+		if (!config?.enabled || (ctx.agent?.kind ?? "main") !== "main" || event.reason === "revive") return;
+		const model = modelKey(ctx.model);
+		const path = config.modelInstructions[model];
+		if (!path) return;
+		try {
+			const text = readFileSync(path, "utf8");
+			if (!text.trim()) throw new Error("file is empty");
+			const instruction = `<model-instructions model=${JSON.stringify(model)}>\n${text.trim()}\n</model-instructions>`;
+			const base = event.systemPrompt;
+			return { systemPrompt: Array.isArray(base) ? [...base, instruction] : `${base}\n\n${instruction}` };
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			log("model-instructions-error", { model, path, message });
+			ctx.ui.notify(`[governor] Model instructions unavailable for ${model}: ${path}: ${message}`, "warning");
+		}
 	});
 
 	/** Queue an evaluation; returns when this one has finished. */

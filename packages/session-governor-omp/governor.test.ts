@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
+import governor, {
 	branchCost,
 	branchTurns,
 	compileRules,
@@ -18,6 +18,61 @@ import {
 	type RuleVars,
 	type ShiftState,
 } from "./governor.ts";
+
+describe("model-specific instructions", () => {
+	test("validates exact selectors and resolves paths relative to config", () => {
+		const dir = mkdtempSync(join(tmpdir(), "gov-model-config-"));
+		try {
+			const path = join(dir, "governor.yml");
+			writeFileSync(path, 'rules: []\nmodelInstructions:\n  provider/model: guidance.md\n');
+			expect(loadConfig(path)?.modelInstructions).toEqual({ "provider/model": join(dir, "guidance.md") });
+			writeFileSync(path, 'rules: []\nmodelInstructions:\n  bad: guidance.md\n');
+			expect(() => loadConfig(path)).toThrow(/invalid modelInstructions selector/);
+			writeFileSync(path, 'rules: []\nmodelInstructions:\n  provider/model: 42\n');
+			expect(() => loadConfig(path)).toThrow(/modelInstructions/);
+		} finally { rmSync(dir, { recursive: true, force: true }); }
+	});
+
+	test("main session composes prompts, follows model switches, and warns on missing files", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "gov-model-hook-"));
+		const oldConfig = process.env.OMP_GOVERNOR_CONFIG;
+		const oldLog = process.env.OMP_GOVERNOR_LOG;
+		try {
+			const config = join(dir, "governor.yml");
+			writeFileSync(join(dir, "one.md"), "ONE instruction");
+			writeFileSync(join(dir, "two.md"), "TWO instruction");
+			writeFileSync(config, 'rules: []\nmodelInstructions:\n  provider/one: one.md\n  provider/two: two.md\n  provider/missing: missing.md\n');
+			process.env.OMP_GOVERNOR_CONFIG = config;
+			process.env.OMP_GOVERNOR_LOG = join(dir, "log.jsonl");
+			const handlers: Record<string, Function> = {};
+			const pi = { on: (name: string, fn: Function) => { handlers[name] = fn; }, events: { on: () => {} }, registerCommand: () => {}, appendEntry: () => {} };
+			governor(pi as never);
+			const notices: string[] = [];
+			const ctx = { agent: { kind: "main" }, model: { provider: "provider", id: "one" }, ui: { notify: (msg: string) => notices.push(msg) }, sessionManager: { getEntries: () => [] } };
+			await handlers.session_start({}, ctx);
+			const event = { reason: "prompt", systemPrompt: ["common safety", "output style"] };
+			const first = handlers.before_agent_start(event, ctx);
+			expect(first.systemPrompt).toEqual(["common safety", "output style", expect.stringContaining("ONE instruction")]);
+			ctx.model.id = "two";
+			const second = handlers.before_agent_start(event, ctx);
+			expect(second.systemPrompt).toEqual(["common safety", "output style", expect.stringContaining("TWO instruction")]);
+			expect(JSON.stringify(second)).not.toContain("ONE instruction");
+			ctx.model.id = "unmapped";
+			expect(handlers.before_agent_start(event, ctx)).toBeUndefined();
+			ctx.model.id = "one";
+			ctx.agent.kind = "sub";
+			expect(handlers.before_agent_start(event, ctx)).toBeUndefined();
+			ctx.agent.kind = "main";
+			ctx.model.id = "missing";
+			expect(handlers.before_agent_start(event, ctx)).toBeUndefined();
+			expect(notices.some(n => n.includes("Model instructions unavailable"))).toBe(true);
+		} finally {
+			if (oldConfig === undefined) delete process.env.OMP_GOVERNOR_CONFIG; else process.env.OMP_GOVERNOR_CONFIG = oldConfig;
+			if (oldLog === undefined) delete process.env.OMP_GOVERNOR_LOG; else process.env.OMP_GOVERNOR_LOG = oldLog;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
 
 const env = createEnvironment();
 const vars = (over: Partial<RuleVars> = {}): RuleVars => ({
