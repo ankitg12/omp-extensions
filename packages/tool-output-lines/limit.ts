@@ -26,7 +26,7 @@ export async function loadLimits(path = configPath, toolName = "") {
 }
 
 type Block = { type: string; text?: string; [key: string]: unknown };
-type Result = { toolName: string; content: Block[] };
+type Result = { toolName: string; content: Block[]; details?: Record<string, unknown>; input?: { path?: unknown; file_path?: unknown } };
 type Context = { sessionManager: { saveArtifact(text: string, toolType: string): Promise<string | undefined> } };
 
 export async function limitResult(event: Result, ctx: Context, limits = defaults) {
@@ -45,7 +45,21 @@ export async function limitResult(event: Result, ctx: Context, limits = defaults
   const preview = lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
   const notice = `[${lines.length} lines · full output: artifact://${id}]`;
   const nonText = event.content.filter(block => block.type !== "text");
-  return { content: [{ type: "text", text: `${preview}\n${notice}` }, ...nonText] };
+  const details = event.details ? { ...event.details } : undefined;
+  if (details && event.toolName === "read") {
+    const display = details.displayContent;
+    if (display && typeof display === "object" && "text" in display && typeof display.text === "string") {
+      const displayLines = display.text.split(/\r?\n/).slice(0, limits.maxLines - 1);
+      const lineNumbers = "lineNumbers" in display && Array.isArray(display.lineNumbers) ? display.lineNumbers.slice(0, displayLines.length) : undefined;
+      details.displayContent = { ...display, text: `${displayLines.join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`, ...(lineNumbers ? { lineNumbers: [...lineNumbers, (lineNumbers.at(-1) ?? 0) + 1] } : {}) };
+    }
+    const path = event.input?.path ?? event.input?.file_path;
+    if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;
+  }
+  if (details && event.toolName === "grep" && typeof details.displayContent === "string") {
+    details.displayContent = `${details.displayContent.split(/\r?\n/).slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`;
+  }
+  return { content: [{ type: "text", text: `${preview}\n${notice}` }, ...nonText], ...(details ? { details } : {}) };
 }
 
 export default function toolOutputLines(pi: { on: (name: string, handler: (event: Result, ctx: Context) => Promise<unknown>) => void }) {
