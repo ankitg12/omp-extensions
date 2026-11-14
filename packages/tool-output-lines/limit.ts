@@ -56,8 +56,43 @@ export async function limitResult(event: Result, ctx: Context, limits = defaults
     const path = event.input?.path ?? event.input?.file_path;
     if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;
   }
-  if (details && event.toolName === "grep" && typeof details.displayContent === "string") {
+  if (details && ["grep", "ast_grep", "ast_edit"].includes(event.toolName) && typeof details.displayContent === "string") {
     details.displayContent = `${details.displayContent.split(/\r?\n/).slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`;
+  }
+  if (details && event.toolName === "glob" && Array.isArray(details.files)) {
+    delete details.fileCount;
+    delete details.files;
+    details.truncated = true;
+  }
+  if (details && event.toolName === "task" && Array.isArray(details.results)) {
+    let remainingLines = limits.maxLines - 1;
+    let remainingChars = limits.maxPreviewChars;
+    let noticeAdded = false;
+    details.results = details.results.map((item: unknown) => {
+      if (!item || typeof item !== "object" || !("output" in item) || typeof item.output !== "string") return item;
+      const visible = item.output.split(/\r?\n/).slice(0, remainingLines).join("\n").slice(0, remainingChars);
+      remainingLines -= visible ? visible.split("\n").length : 0;
+      remainingChars -= visible.length;
+      const shortened = visible !== item.output;
+      const output = shortened && !noticeAdded ? `${visible}${visible ? "\n" : ""}${notice}` : visible;
+      if (shortened) noticeAdded = true;
+      return { ...item, output };
+    });
+  }
+  if (details && event.toolName === "eval" && Array.isArray(details.cells)) {
+    let remainingLines = limits.maxLines - 1;
+    let remainingChars = limits.maxPreviewChars;
+    let noticeAdded = false;
+    details.cells = details.cells.map((cell: unknown) => {
+      if (!cell || typeof cell !== "object" || !("output" in cell) || typeof cell.output !== "string") return cell;
+      const visible = cell.output.split(/\r?\n/).slice(0, remainingLines).join("\n").slice(0, remainingChars);
+      remainingLines -= visible ? visible.split("\n").length : 0;
+      remainingChars -= visible.length;
+      const shortened = visible !== cell.output;
+      const output = shortened && !noticeAdded ? `${visible}${visible ? "\n" : ""}${notice}` : visible;
+      if (shortened) noticeAdded = true;
+      return { ...cell, output, views: [] };
+    });
   }
   return { content: [{ type: "text", text: `${preview}\n${notice}` }, ...nonText], ...(details ? { details } : {}) };
 }

@@ -57,6 +57,33 @@ describe("tool output line limit", () => {
     expect((grep!.details!.displayContent as string).split("\n")).toHaveLength(10);
   });
 
+  test("caps eval cell output in the terminal", async () => {
+    const text = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n");
+    const output = await limitResult({ toolName: "eval", content: [{ type: "text", text }], details: { cells: [{ code: "print()", output: text, views: [{ text, view: { kind: "markdown", text } }] }] } }, { sessionManager: { saveArtifact: async () => "9" } }, { maxLines: 10, maxPreviewChars: 2000 });
+    const cell = (output!.details!.cells as { output: string; views: unknown[] }[])[0];
+    expect(cell.output.split("\n")).toHaveLength(10);
+    expect(cell.output).toContain("artifact://9");
+    expect(cell.views).toEqual([]);
+  });
+
+  test("caps AST, glob, and task output metadata", async () => {
+    const text = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n");
+    const ctx = { sessionManager: { saveArtifact: async () => "8" } };
+    const limits = { maxLines: 10, maxPreviewChars: 2000 };
+    for (const toolName of ["ast_grep", "ast_edit"]) {
+      const output = await limitResult({ toolName, content: [{ type: "text", text }], details: { displayContent: text } }, ctx, limits);
+      expect((output!.details!.displayContent as string).split("\n")).toHaveLength(10);
+    }
+    const glob = await limitResult({ toolName: "glob", content: [{ type: "text", text }], details: { files: Array.from({ length: 40 }, (_, i) => `file${i}`) } }, ctx, limits);
+    expect(glob!.details!.files).toBeUndefined();
+    expect(glob!.details!.fileCount).toBeUndefined();
+    expect(glob!.details!.truncated).toBe(true);
+    const task = await limitResult({ toolName: "task", content: [{ type: "text", text }], details: { results: [{ output: text }, { output: text }] } }, ctx, limits);
+    const results = task!.details!.results as { output: string }[];
+    expect(results[0].output.split("\n")).toHaveLength(10);
+    expect(results[1].output).toBe("");
+  });
+
   test("keeps short results unchanged", async () => {
     expect(await limitResult(result("one\ntwo"), { sessionManager: { saveArtifact: async () => "1" } })).toBeUndefined();
   });
