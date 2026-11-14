@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { limitResult, loadLimits } from "./limit.ts";
 
 const result = (text: string) => ({ toolName: "bash", content: [{ type: "text", text }] });
@@ -27,6 +28,18 @@ describe("tool output line limit", () => {
       expect(await loadLimits(path, "bash")).toEqual({ maxLines: 3, maxPreviewChars: 2000 });
       expect(await loadLimits(path, "grep")).toEqual({ maxLines: 10, maxPreviewChars: 300 });
       expect(await loadLimits(path, "read")).toEqual({ maxLines: 10, maxPreviewChars: 2000 });
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test("respects XDG_CONFIG_HOME when selecting the config file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "output-limit-"));
+    try {
+      const configDir = join(dir, "omp");
+      await mkdir(configDir);
+      await writeFile(join(configDir, "tool-output-lines.json"), JSON.stringify({ maxLines: 3, maxPreviewChars: 100 }));
+      const child = spawnSync(process.execPath, ["-e", 'import { loadLimits } from "./packages/tool-output-lines/limit.ts"; console.log(JSON.stringify(await loadLimits()))'], { cwd: process.cwd(), env: { ...process.env, XDG_CONFIG_HOME: dir }, encoding: "utf8" });
+      expect(child.status).toBe(0);
+      expect(JSON.parse(child.stdout)).toEqual({ maxLines: 3, maxPreviewChars: 100 });
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 

@@ -2,7 +2,7 @@
 
 By default, limits text in each tool result to ten lines, including a notice with a short `artifact://` reference. Preview text is also capped at 2,000 characters. Use `read` with a line range, such as `artifact://1:10-19`, for more detail. Non-text blocks and result error status are unchanged.
 
-Configure `~/.config/omp/tool-output-lines.json`:
+Configure `$XDG_CONFIG_HOME/omp/tool-output-lines.json`, or `~/.config/omp/tool-output-lines.json` when `XDG_CONFIG_HOME` is unset, empty, or not absolute:
 
 ```json
 {

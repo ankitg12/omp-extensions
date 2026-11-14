@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 const defaults = { maxLines: 10, maxPreviewChars: 2000 };
-const configPath = join(homedir(), ".config", "omp", "tool-output-lines.json");
+const xdgConfig = process.env.XDG_CONFIG_HOME;
+const configPath = join(xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(homedir(), ".config"), "omp", "tool-output-lines.json");
 
 export async function loadLimits(path = configPath, toolName = "") {
   try {
