@@ -1,5 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -27,26 +26,23 @@ export async function loadLimits(path = configPath, toolName = "") {
 
 type Block = { type: string; text?: string; [key: string]: unknown };
 type Result = { toolName: string; content: Block[] };
-type Context = { sessionManager: { getArtifactsDir(): string | undefined } };
+type Context = { sessionManager: { saveArtifact(text: string, toolType: string): Promise<string | undefined> } };
 
 export async function limitResult(event: Result, ctx: Context, limits = defaults) {
   const text = event.content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n");
   const lines = text.split(/\r?\n/);
   if (lines.length <= limits.maxLines && text.length <= limits.maxPreviewChars) return;
 
-  const dir = ctx.sessionManager.getArtifactsDir();
-  if (!dir) return;
-  let path: string;
+  let id: string | undefined;
   try {
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    path = join(dir, `tool-output-${randomUUID()}.txt`);
-    await writeFile(path, text, { mode: 0o600, flag: "wx" });
+    id = await ctx.sessionManager.saveArtifact(text, "tool-output");
   } catch {
     return;
   }
+  if (id === undefined) return;
 
   const preview = lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
-  const notice = `[Output shortened: ${lines.length} lines; full output: ${path}. Use read with a line range.]`;
+  const notice = `[${lines.length} lines · full output: artifact://${id}]`;
   const nonText = event.content.filter(block => block.type !== "text");
   return { content: [{ type: "text", text: `${preview}\n${notice}` }, ...nonText] };
 }
