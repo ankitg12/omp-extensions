@@ -1,0 +1,7 @@
+{
+  "name": "@ankitg12/tool-output-lines",
+  "version": "0.1.0",
+  "description": "Limit tool result context to ten lines and preserve full output",
+  "license": "MIT",
+  "pi": { "extensions": ["./limit.ts"] }
+}
