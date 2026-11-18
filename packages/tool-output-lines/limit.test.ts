@@ -115,6 +115,32 @@ describe("tool output line limit", () => {
     expect(saves).toBe(0);
   });
 
+  test("combines an OMP continuation notice with the sampled-result notice", async () => {
+    const text = `${Array.from({ length: 70 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n")}\n\n[Showing lines 1-70 of 129 (9.6KB limit). Use :71 to continue]`;
+    const out = await limitResult({ toolName: "read", input: { path: "notes.md" }, content: [{ type: "text", text }], details: { displayContent: { text: "old" }, meta: { truncation: { direction: "head", truncatedBy: "bytes", totalLines: 129, shownRange: { start: 1, end: 70 }, nextOffset: 71 }, other: "keep" } } }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+    const block = out!.content[0];
+    if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
+    expect(block.text).toContain("sampled");
+    expect(block.text).toContain("OMP showed 1-70 of 129 source lines");
+    expect(block.text).toContain("continue source at :71");
+    expect(block.text).toContain("partial result: artifact://5");
+    expect(block.text).not.toContain("[Showing lines");
+    const meta = out!.details!.meta;
+    if (!meta || typeof meta !== "object") throw new Error("missing metadata");
+    expect("truncation" in meta).toBe(false);
+    expect("other" in meta && meta.other).toBe("keep");
+  });
+
+  test("does not trust a continuation footer without matching metadata", async () => {
+    const text = `${Array.from({ length: 70 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n")}\n\n[Showing lines 1-70 of 129 (9.6KB limit). Use :71 to continue]`;
+    let saved = "";
+    const out = await limitResult({ toolName: "read", input: { path: "notes.md" }, content: [{ type: "text", text }], details: {} }, { sessionManager: { saveArtifact: async value => { saved = value; return "5"; } } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+    const block = out!.content[0];
+    if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
+    expect(block.text).not.toContain("OMP showed 1-70 of 129 source lines");
+    expect(saved).toContain("[Showing lines 1-70 of 129");
+  });
+
   test("a footer without matching native truncation metadata is not trusted", async () => {
     const text = `${Array.from({ length: 100 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n")}\n[Showing lines 1-100 and 168-251 of 251; 67 middle lines (3.2KB) elided. Read artifact://68 for full output]`;
     let saved = "";

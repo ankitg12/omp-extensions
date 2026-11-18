@@ -61,7 +61,10 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   const meta = event.details?.meta;
   const truncation = meta && typeof meta === "object" && "truncation" in meta ? meta.truncation : undefined;
   const footer = candidate && truncation && typeof truncation === "object" && "artifactId" in truncation && truncation.artifactId === candidate[3] ? candidate : null;
-  const lines = footer ? allLines.slice(0, -1) : allLines;
+  const page = event.toolName === "read" ? allLines.at(-1)?.match(/^\[Showing lines (\d+)-(\d+) of (\d+) \([^\]]+ limit\)\. Use :(\d+) to continue\]$/) : null;
+  const pageMeta = truncation && typeof truncation === "object" && "shownRange" in truncation && typeof truncation.shownRange === "object" && truncation.shownRange && "start" in truncation.shownRange && "end" in truncation.shownRange ? truncation.shownRange : undefined;
+  const continuation = page && pageMeta && pageMeta.start === Number(page[1]) && pageMeta.end === Number(page[2]) && "totalLines" in truncation && truncation.totalLines === Number(page[3]) && "nextOffset" in truncation && truncation.nextOffset === Number(page[4]) ? page : null;
+  const lines = footer || continuation ? allLines.slice(0, -1) : allLines;
   // An explicit range within the limit is a request for exact lines; OMP adds context lines and a footer around it.
   const selector = event.toolName === "read" ? String(event.input?.path ?? event.input?.file_path ?? "").replace(/^[A-Za-z]:/, "").match(/:(\d+)(?:-(\d+)|\+(\d+))?(?::raw)?$/) : null;
   if (selector) {
@@ -86,11 +89,12 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   const sampling = sampled ? `sampled ${sampled.picked.length}/${lines.length} lines` : `${lines.length} lines`;
   const notice = footer
     ? `[${sampling} · OMP omitted ${footer[2]} of ${footer[1]} source lines · full output: artifact://${id}]`
+    : continuation ? `[${sampling} · OMP showed ${continuation[1]}-${continuation[2]} of ${continuation[3]} source lines · continue source at :${continuation[4]} · partial result: artifact://${id}]`
     : sampled ? `[${sampling} · artifact://${id}]` : `[${sampling} · full output: artifact://${id}]`;
   const nonText = event.content.filter(block => block.type !== "text");
   const details = event.details ? { ...event.details } : undefined;
   if (details && event.toolName === "read") {
-    if (footer && details.meta && typeof details.meta === "object" && "truncation" in details.meta) {
+    if ((footer || continuation) && details.meta && typeof details.meta === "object" && "truncation" in details.meta) {
       const { truncation: _truncation, ...meta } = details.meta;
       details.meta = meta;
     }

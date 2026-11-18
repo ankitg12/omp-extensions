@@ -33,6 +33,6 @@ Change the limit for the current session with `/tool-lines`: `off` stops truncat
 
 Global limits are required; per-tool overrides are optional and inherit any omitted field. Tool names are exact. The minimum line limit is 2 and the minimum character limit is 1. Invalid configuration falls back to the defaults. Changes apply to the next tool result.
 
-Tool-side truncation happens first. When OMP supplies a verified full-output artifact, the extension combines both truncation notices and points to that artifact. Otherwise, it saves the tool result it received; this may already be truncated. If saving fails, the extension leaves the result unchanged.
+Tool-side truncation happens first. When OMP supplies a verified full-output artifact, the extension combines both truncation notices and points to that artifact. For a verified byte-limited source read, the combined notice gives the source continuation and labels the saved result as partial. Otherwise, the extension saves the tool result it received; this may already be truncated. If saving fails, the extension leaves the result unchanged.
 
 Test with `bun test packages/tool-output-lines/limit.test.ts` from the repository root.
