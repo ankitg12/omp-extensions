@@ -186,7 +186,7 @@ export function parseCommand(args: string, current: Override): { next: Override;
 }
 
 const exactReadNote = (maxLines: number) =>
-  `Tool results longer than ${maxLines} lines are shortened. A result within ${maxLines} lines arrives in full, so to see exact lines request a range of at most ${maxLines} lines: \`read <path>:START-END\`, or \`read artifact://ID:START-END\` for a saved result.`;
+  `Tool results longer than ${maxLines} lines may be shortened. Explicit raw reads bypass this extension and can exceed the limit. To see exact source lines, request a normal read range of at most ${maxLines} lines: \`read <path>:START-END\`, or \`read artifact://ID:START-END\` for a saved result.`;
 
 const strideNote = [
   "Tool results longer than the limit may arrive as an evenly spaced sample of lines (each sample point may carry a few context lines), not a contiguous block.",
