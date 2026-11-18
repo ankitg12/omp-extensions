@@ -57,8 +57,12 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   const text = event.content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n");
   const lines = text.split(/\r?\n/);
   if (lines.length <= limits.maxLines && text.length <= limits.maxPreviewChars) return;
-  // OMP already shortened this read (structural summary or head+tail elision); a second cut would hide its re-read hints.
-  if (event.toolName === "read" && /\[Showing lines [\d, and-]+ of \d+;|\[…\d+ln elided/.test(text)) return;
+  // An explicit range within the limit is a request for exact lines; OMP adds context lines and a footer around it.
+  const selector = event.toolName === "read" ? String(event.input?.path ?? event.input?.file_path ?? "").replace(/^[A-Za-z]:/, "").match(/:(\d+)(?:-(\d+)|\+(\d+))?(?::raw)?$/) : null;
+  if (selector) {
+    const size = selector[2] ? Number(selector[2]) - Number(selector[1]) + 1 : selector[3] ? Number(selector[3]) : 1;
+    if (size <= limits.maxLines) return;
+  }
 
   let id: string | undefined;
   try {

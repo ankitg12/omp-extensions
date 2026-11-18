@@ -92,11 +92,21 @@ describe("tool output line limit", () => {
     }
   });
 
-  test("a read that OMP already elided passes through untouched", async () => {
+  test("a read that OMP already elided is still limited", async () => {
     const text = `${Array.from({ length: 100 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n")}\n[Showing lines 1-100 and 168-251 of 251; 67 middle lines (3.2KB) elided. Read artifact://68 for full output]`;
     const out = await limitResult({ toolName: "read", content: [{ type: "text", text }], details: {} }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
-    expect(out).toBeUndefined();
+    expect((out!.content[0] as { text: string }).text).toContain("[sampled ");
   });
+
+  test("a range read within the limit returns in full even when OMP adds context lines", async () => {
+    const text = Array.from({ length: 14 }, (_, i) => `${i + 39}|row ${i + 39}`).join("\n");
+    const ctx = { sessionManager: { saveArtifact: async () => "5" } };
+    const limits = { maxLines: 10, maxPreviewChars: 2000, mode: "stride" as const, before: 0, after: 0 };
+    expect(await limitResult({ toolName: "read", input: { path: "/x/a.ts:40-49" }, content: [{ type: "text", text }], details: {} }, ctx, limits)).toBeUndefined();
+    expect(await limitResult({ toolName: "read", input: { path: "/x/a.ts:40+10" }, content: [{ type: "text", text }], details: {} }, ctx, limits)).toBeUndefined();
+    expect(await limitResult({ toolName: "read", input: { path: "/x/a.ts:40-60" }, content: [{ type: "text", text }], details: {} }, ctx, limits)).toBeDefined();
+  });
+
 
   test("slash command accepts context tokens together with mode", () => {
     expect(parseCommand("stride context=2", { off: false }).next).toEqual({ off: false, mode: "stride", before: 2, after: 2 });
