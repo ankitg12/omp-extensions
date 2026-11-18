@@ -48,8 +48,8 @@ The governor can append a trusted instruction file for the main agent's current 
 
 ```yaml
 modelInstructions:
-  amd-claude/claude-opus-5.5: ~/.omp/model-instructions/opus.md
-  amd-gpt/gpt-6.1-sol: ~/.omp/model-instructions/sol.md
+  provider-a/model-a: ~/.omp/model-instructions/model-a.md
+  provider-b/model-b: ~/.omp/model-instructions/model-b.md
 ```
 
 The file is read at each user prompt; a model switch selects the new file at the next prompt.
@@ -68,8 +68,9 @@ The rules file is `~/.omp/governor.yml` (fallback env: `OMP_GOVERNOR_CONFIG`). I
 ```yaml
 enabled: true          # optional, default true
 agents: [main]         # optional; agent kinds to act in (main | sub)
+pruneOnModelSwitch: false  # optional; elide older tool results before the new model's first request
 
-# Epoch pruning shape (switch pruning is configured in model-switch-prune-omp)
+# Epoch pruning shape (foreign-model pruning is configured in model-switch-prune-omp)
 prune:
   style: soft          # soft (head + tail, below) | aggressive (like /shake: >200 chars → marker, no head/tail)
   minChars: 2000       # elide results longer than this
@@ -103,6 +104,12 @@ rules:                 # ordered; first matching rule wins
     when: 'turns >= 4'
     effort: auto
 ```
+
+### Pruning on model switch
+
+Set `pruneOnModelSwitch: true` to latch a wire-only epoch cut when a new model is observed on a confirmed model change. The cut is the last user request before the switch, so its exchange stays intact. The governor applies `prune.style` before the new model's first request; it does not rewrite the saved session. Automatic fallback and prewalk changes do not trigger a cut. The policy follows `agents` and is off by default.
+
+This is separate from the always-on foreign-model pass: that pass only elides older foreign results over 6,000 characters and protects the last two. Epoch pruning also affects older same-model results. `aggressive` replaces eligible text with a marker; unlike native `/shake`, it does not create recoverable artifact links. Use `soft` when the new model needs more of the earlier results. `/governor` shows the policy and last prune statistics.
 
 ### Stuck detection (agent self-report)
 

@@ -10,8 +10,8 @@
  * rules). A manual model change after an automatic one pauses the engine for the session.
  * State is persisted as `session-governor` custom entries (legacy `model-shift` entries are
  * still read), so it survives resume. Pruning is wire-only: see ../model-switch-prune-omp/prune.ts.
- * Pruning the previous model's turns on a switch is NOT policy and does not live here: it is the
- * always-on model-switch-prune-omp extension. This file only applies rule-latched epoch cuts.
+ * The model-switch-prune-omp extension always handles foreign model turns. This extension can also
+ * latch an epoch cut on model switches when pruneOnModelSwitch is enabled.
  *
  * Native compaction triggers on max(billed tokens, stored-history estimate) and runs before the
  * extension `agent_end`. Wire-only pruning lowers only the billed number, so keep the native
@@ -72,6 +72,8 @@ export interface ShiftConfig {
 	modelInstructions: Record<string, string>;
 	/** Model selector or OMP role to use after a committed compaction. */
 	afterCompaction?: string;
+	/** Latch an epoch cut after the active model changes. */
+	pruneOnModelSwitch: boolean;
 }
 
 export interface CompiledRule {
@@ -169,6 +171,9 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 	if (!isRecord(raw) || Array.isArray(raw)) throw new Error(`${path}: expected a mapping at top level`);
 	const obj = raw;
 	if (obj.rules !== undefined && !Array.isArray(obj.rules)) throw new Error(`${path}: 'rules' must be a list`);
+	if (obj.pruneOnModelSwitch !== undefined && typeof obj.pruneOnModelSwitch !== "boolean") {
+		throw new Error(`${path}: 'pruneOnModelSwitch' must be a boolean`);
+	}
 	if (obj.afterCompaction !== undefined && (typeof obj.afterCompaction !== "string" || !obj.afterCompaction.trim())) {
 		throw new Error(`${path}: 'afterCompaction' must be a non-empty model selector or role`);
 	}
@@ -203,6 +208,7 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 		agents: Array.isArray(obj.agents) ? obj.agents.map(String) : ["main"],
 		rules: (obj.rules ?? []) as RuleConfig[],
 		afterCompaction: typeof obj.afterCompaction === "string" ? obj.afterCompaction.trim() : undefined,
+		pruneOnModelSwitch: obj.pruneOnModelSwitch === true,
 		logPath: typeof obj.logPath === "string" ? obj.logPath : DEFAULT_LOG_PATH,
 		epochShape,
 		debug: obj.debug === true || prune.debug === true,
@@ -396,6 +402,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	let rules: CompiledRule[] = [];
 	let loadError: string | undefined;
 	let state: ShiftState = { fired: new Set(), paused: false };
+	let lastObservedModel = "";
 	let startedAt = Date.now();
 	/** AFK flag from agent-afk-omp's `afk:changed`; in-memory only, so a resumed session starts not-AFK. */
 	let afk = false;
@@ -486,6 +493,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		if (shakeErr) log("shake-core-fallback", { error: shakeErr });
 		lastCtx = ctx;
 		onSession("start", ctx as unknown as SessionCtx);
+		lastObservedModel = modelKey(ctx.model);
 		if (loadError) ctx.ui.notify(`[governor] Config rejected, engine disabled: ${loadError}`, "error");
 	});
 	pi.on("agent_start", () => {
@@ -496,6 +504,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		lastCtx = ctx;
 		afk = false;
 		onSession("switch", ctx as unknown as SessionCtx);
+		lastObservedModel = modelKey(ctx.model);
 		lastWire = [];
 	});
 
@@ -717,9 +726,26 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		if (rule.prune) latchCut();
 	}
 
-	// Wire-only epoch pruning: only after a rule latched a cut. Runs in every agent kind.
+	// Wire-only epoch pruning runs in every agent kind.
 	pi.on("context", (event, ctx) => {
 		lastWire = event.messages;
+		const current = modelKey(ctx.model);
+		if (current && lastObservedModel && current !== lastObservedModel && config?.enabled &&
+			config.pruneOnModelSwitch && config.agents.includes(ctx.agent?.kind ?? "main")) {
+			const branch = ctx.sessionManager.getBranch();
+			const switchIndex = branch.findLastIndex(entry => entry.type === "model_change");
+			const entry = branch[switchIndex];
+			const confirmed = entry?.type === "model_change" && entry.model === current &&
+				entry.role !== "fallback" && entry.role !== "prewalk" && !entry.resolvedModelIsFallback;
+			const cutTs = confirmed ? userTimestamps(branch.slice(0, switchIndex)).filter(Number.isFinite).at(-1) : undefined;
+			if (cutTs !== undefined && (!state.cut || cutTs > state.cut.cutTs)) {
+				const previous = lastObservedModel;
+				state.cut = { rule: "model-switch", cutTs };
+				record({ event: "pruned", rule: "model-switch", cutTs, repeat: true, from: previous, to: current });
+				ctx.ui.notify(`[governor] Model switch ${previous} → ${current}: older tool results are elided on the wire.`, "info");
+			}
+		}
+		if (current) lastObservedModel = current;
 		if (!state.cut || (config && !config.enabled)) return;
 		const stats = emptyStats();
 		const messages = pruneBeforeCut(event.messages, state.cut.cutTs, config?.epochShape, stats);
@@ -751,6 +777,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 				`governor: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? `armed; model rules paused (manual /model)${state.effortPaused ? ", effort rules paused (manual effort)" : ""}` : state.effortPaused ? "armed; effort rules paused (manual effort)" : "armed"}`,
 				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune} prunable=${vars.prunable} blocked_streak=${vars.blocked_streak} attempts_on_goal=${vars.attempts_on_goal}`,
 				...(compactionTarget(ctx) ? [`after compaction: ${compactionTarget(ctx)}${pendingCompaction ? " (pending until run end)" : ""}`] : []),
+				`prune on model switch: ${config?.pruneOnModelSwitch ? "on" : "off"}`,
 				...(pi.getAllTools().some(t => t.name === "progress") ? [] : ["WARNING: no `progress` tool (load agent-progress-tool-omp); blocked_streak/attempts_on_goal stay 0, stuck rules cannot fire"]),
 				`prune: cut=${state.cut ? `${new Date(state.cut.cutTs).toISOString()} (rule ${state.cut.rule})` : "none"}`,
 				lastPrune
