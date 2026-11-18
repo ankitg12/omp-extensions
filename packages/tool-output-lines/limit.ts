@@ -55,8 +55,13 @@ function sample(lines: string[], limits: Limits) {
 
 export async function limitResult(event: Result, ctx: Context, limits: Limits = defaults) {
   const text = event.content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n");
-  const lines = text.split(/\r?\n/);
-  if (lines.length <= limits.maxLines && text.length <= limits.maxPreviewChars) return;
+  const allLines = text.split(/\r?\n/);
+  if (allLines.length <= limits.maxLines && text.length <= limits.maxPreviewChars) return;
+  const candidate = event.toolName === "read" ? allLines.at(-1)?.match(/^\[Showing lines .+ of (\d+); (\d+) middle lines \([^\]]+\) elided\..*Read artifact:\/\/([^\s\]]+) for full output\]$/) : null;
+  const meta = event.details?.meta;
+  const truncation = meta && typeof meta === "object" && "truncation" in meta ? meta.truncation : undefined;
+  const footer = candidate && truncation && typeof truncation === "object" && "artifactId" in truncation && truncation.artifactId === candidate[3] ? candidate : null;
+  const lines = footer ? allLines.slice(0, -1) : allLines;
   // An explicit range within the limit is a request for exact lines; OMP adds context lines and a footer around it.
   const selector = event.toolName === "read" ? String(event.input?.path ?? event.input?.file_path ?? "").replace(/^[A-Za-z]:/, "").match(/:(\d+)(?:-(\d+)|\+(\d+))?(?::raw)?$/) : null;
   if (selector) {
@@ -64,13 +69,13 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     if (size <= limits.maxLines) return;
   }
 
-  let id: string | undefined;
+  let id: string | undefined = footer?.[3];
   try {
     const path = event.input?.path ?? event.input?.file_path;
     const raw = typeof path === "string" && /(?:^|:)raw(?::|$)/.test(path);
     const first = /^\[Skill file: .*\]$/.test(lines[0] ?? "") ? 1 : 0;
     const plain = event.toolName === "read" && !raw && /^\s*\d+\|/.test(lines[first] ?? "") ? lines.map((line, i) => i < first ? line : line.replace(/^\s*\d+(?:-\d+)?\|/, "")).join("\n") : text;
-    id = await ctx.sessionManager.saveArtifact(plain, "tool-output");
+    if (!id) id = await ctx.sessionManager.saveArtifact(plain, "tool-output");
   } catch {
     return;
   }
@@ -78,12 +83,17 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
 
   const sampled = limits.mode !== "head" && lines.length > 2 ? sample(lines, limits) : undefined;
   const preview = sampled ? sampled.text : lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
-  const notice = sampled
-    ? `[sampled ${sampled.picked.length}/${lines.length} lines · artifact://${id}]`
-    : `[${lines.length} lines · full output: artifact://${id}]`;
+  const sampling = sampled ? `sampled ${sampled.picked.length}/${lines.length} lines` : `${lines.length} lines`;
+  const notice = footer
+    ? `[${sampling} · OMP omitted ${footer[2]} of ${footer[1]} source lines · full output: artifact://${id}]`
+    : sampled ? `[${sampling} · artifact://${id}]` : `[${sampling} · full output: artifact://${id}]`;
   const nonText = event.content.filter(block => block.type !== "text");
   const details = event.details ? { ...event.details } : undefined;
   if (details && event.toolName === "read") {
+    if (footer && details.meta && typeof details.meta === "object" && "truncation" in details.meta) {
+      const { truncation: _truncation, ...meta } = details.meta;
+      details.meta = meta;
+    }
     const display = details.displayContent;
     if (display && typeof display === "object" && "text" in display && typeof display.text === "string") {
       // Show the exact text the model receives, line-number prefixes included, so a regression is visible.

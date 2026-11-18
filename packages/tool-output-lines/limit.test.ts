@@ -93,10 +93,36 @@ describe("tool output line limit", () => {
     }
   });
 
-  test("a read that OMP already elided is still limited", async () => {
+  test("an OMP-elided read has one notice pointing to the full artifact", async () => {
     const text = `${Array.from({ length: 100 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n")}\n[Showing lines 1-100 and 168-251 of 251; 67 middle lines (3.2KB) elided. Read artifact://68 for full output]`;
-    const out = await limitResult({ toolName: "read", content: [{ type: "text", text }], details: {} }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
-    expect((out!.content[0] as { text: string }).text).toContain("[sampled ");
+    let saves = 0;
+    const out = await limitResult({ toolName: "read", content: [{ type: "text", text }], details: { displayContent: { text: "old", startLine: 1 }, meta: { truncation: { artifactId: "68" }, other: "keep" } } }, { sessionManager: { saveArtifact: async () => { saves++; return "5"; } } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+    const block = out!.content[0];
+    if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
+    const result = block.text;
+    expect(result).toContain("[sampled ");
+    expect(result).toContain("OMP omitted 67 of 251 source lines");
+    expect(result).toContain("full output: artifact://68");
+    expect(result).not.toContain("artifact://5");
+    expect(result).not.toContain("[Showing lines");
+    const display = out!.details!.displayContent;
+    if (!display || typeof display !== "object" || !("text" in display)) throw new Error("missing display");
+    expect(display.text).toBe(result);
+    const meta = out!.details!.meta;
+    if (!meta || typeof meta !== "object") throw new Error("missing metadata");
+    expect("truncation" in meta).toBe(false);
+    expect("other" in meta && meta.other).toBe("keep");
+    expect(saves).toBe(0);
+  });
+
+  test("a footer without matching native truncation metadata is not trusted", async () => {
+    const text = `${Array.from({ length: 100 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n")}\n[Showing lines 1-100 and 168-251 of 251; 67 middle lines (3.2KB) elided. Read artifact://68 for full output]`;
+    let saved = "";
+    const out = await limitResult({ toolName: "read", content: [{ type: "text", text }], details: {} }, { sessionManager: { saveArtifact: async value => { saved = value; return "5"; } } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+    const block = out!.content[0];
+    if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
+    expect(block.text).toContain("artifact://5");
+    expect(saved).toContain("Read artifact://68 for full output");
   });
 
   test("a range read within the limit returns in full even when OMP adds context lines", async () => {
