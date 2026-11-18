@@ -1,0 +1,10 @@
+{
+  "name": "@ankitg12/model-switch-continue-omp",
+  "version": "0.1.0",
+  "description": "Continue the current intent after cycling the OMP model",
+  "license": "MIT",
+  "author": "Ankit Gaur",
+  "type": "module",
+  "main": "index.ts",
+  "pi": { "extensions": ["./index.ts"] }
+}
