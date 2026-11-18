@@ -61,7 +61,7 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   let id: string | undefined;
   try {
     // `read` text already carries `N|` prefixes; reading the artifact numbers it again, so save it plain.
-    const plain = event.toolName === "read" && /^\s*\d+\|/.test(lines[0] ?? "") ? lines.map(line => line.replace(/^\s*\d+\|/, "")).join("\n") : text;
+    const plain = event.toolName === "read" && /^\s*\d+\|/.test(lines[0] ?? "") ? lines.map(line => line.replace(/^\s*\d+(?:-\d+)?\|/, "")).join("\n") : text;
     id = await ctx.sessionManager.saveArtifact(plain, "tool-output");
   } catch {
     return;
@@ -71,7 +71,9 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   const sampled = limits.mode === "stride" && lines.length > 2 ? sample(lines, limits) : undefined;
   const preview = sampled ? sampled.text : lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
   const notice = sampled
-    ? `[sampled ${sampled.picked.length} of ${lines.length} lines at evenly spaced points, not contiguous · full output: artifact://${id} · zoom in with read artifact://${id}:START-END]`
+    ? event.toolName === "read"
+      ? `[sampled ${sampled.picked.length} of ${lines.length} result lines, not contiguous · saved result: artifact://${id} (artifact line numbers are relative to saved output) · source lines: read <original-path>:START-END]`
+      : `[sampled ${sampled.picked.length} of ${lines.length} lines at evenly spaced points, not contiguous · full output: artifact://${id} · zoom in with read artifact://${id}:START-END]`
     : `[${lines.length} lines · full output: artifact://${id}]`;
   const nonText = event.content.filter(block => block.type !== "text");
   const details = event.details ? { ...event.details } : undefined;
@@ -82,8 +84,11 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
       const allNumbers = "lineNumbers" in display && Array.isArray(display.lineNumbers) ? display.lineNumbers : undefined;
       if (sampled) {
         const visible = preview.split("\n");
-        const lineNumbers = visible.map((line, i) => Number(line.match(/^\s*(\d+)\|/)?.[1] ?? allNumbers?.[sampled.picked[i]] ?? sampled.picked[i] + 1));
-        details.displayContent = { ...display, text: `${visible.map(line => line.replace(/^\s*\d+\|/, "")).join("\n")}\n${notice}`, lineNumbers: [...lineNumbers, (lineNumbers.at(-1) ?? 0) + 1] };
+        const lineNumbers = visible.map(line => {
+          const match = line.match(/^\s*(\d+)(?:-\d+)?\|/);
+          return match ? Number(match[1]) : null;
+        });
+        details.displayContent = { ...display, text: `${visible.map(line => line.replace(/^\s*\d+(?:-\d+)?\|/, "")).join("\n")}\n${notice}`, lineNumbers: [...lineNumbers, null] };
       } else {
         const displayLines = all.slice(0, limits.maxLines - 1);
         const lineNumbers = allNumbers?.slice(0, displayLines.length);
@@ -159,7 +164,7 @@ export function parseCommand(args: string, current: Override): { next: Override;
 const strideNote = [
   "Tool results longer than the limit may arrive as an evenly spaced sample of lines (each sample point may carry a few context lines), not a contiguous block.",
   "Each sampled line starts with its original line number; the first and last lines are kept; the result ends with a [sampled K of N ...] notice.",
-  "Do not assume skipped lines are empty or irrelevant. Zoom out by reading the sample; zoom in with `read artifact://ID:START-END` or `read <path>:START-END`.",
+  "Do not assume skipped lines are empty or irrelevant. For read results, use original source line numbers with the original path; artifact line numbers are offsets in the saved result and may not match source lines. For other results, zoom in with `read artifact://ID:START-END`.",
 ].join(" ");
 
 type Pi = {

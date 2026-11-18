@@ -19,7 +19,7 @@ Configure `$XDG_CONFIG_HOME/omp/tool-output-lines.json`, or `~/.config/omp/tool-
 
 ## Modes: head and stride
 
-`"mode": "head"` (default) keeps the first lines. `"mode": "stride"` keeps evenly spaced lines from the whole output, always including the first and the last. Each sampled line shows its original line number (added when the tool gave none), and the notice reads `[sampled K of N evenly spaced lines ...]`. This gives the agent a zoom-out view; it zooms in with `read artifact://ID:START-END` or `read <path>:START-END`. When any configured mode is `stride`, the extension appends a short note about this to the system prompt, so the agent knows the lines are not contiguous. Set `mode` globally or per tool:
+`"mode": "head"` (default) keeps the first lines. `"mode": "stride"` keeps evenly spaced lines from the tool result, including native `read` structural summaries when they exceed the limit. For a sampled `read`, use `read <original-path>:START-END` with the displayed source line numbers to zoom in. An artifact contains the saved tool result, which can already be a range or summary; its line numbers are relative to that result and may not match the source. For other tools, `read artifact://ID:START-END` uses result line numbers. When stride is active, the extension also tells the agent that sampled lines are not contiguous. Set `mode` globally or per tool:
 
 ```json
 { "maxLines": 10, "maxPreviewChars": 2000, "tools": { "read": { "mode": "stride", "before": 1, "after": 1 } } }
