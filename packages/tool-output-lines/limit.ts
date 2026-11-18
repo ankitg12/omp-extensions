@@ -60,7 +60,9 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
 
   let id: string | undefined;
   try {
-    id = await ctx.sessionManager.saveArtifact(text, "tool-output");
+    // `read` text already carries `N|` prefixes; reading the artifact numbers it again, so save it plain.
+    const plain = event.toolName === "read" && /^\s*\d+\|/.test(lines[0] ?? "") ? lines.map(line => line.replace(/^\s*\d+\|/, "")).join("\n") : text;
+    id = await ctx.sessionManager.saveArtifact(plain, "tool-output");
   } catch {
     return;
   }
@@ -76,8 +78,11 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   if (details && event.toolName === "read") {
     const display = details.displayContent;
     if (display && typeof display === "object" && "text" in display && typeof display.text === "string") {
-      const displayLines = display.text.split(/\r?\n/).slice(0, limits.maxLines - 1);
-      const lineNumbers = "lineNumbers" in display && Array.isArray(display.lineNumbers) ? display.lineNumbers.slice(0, displayLines.length) : undefined;
+      const all = display.text.split(/\r?\n/);
+      const allNumbers = "lineNumbers" in display && Array.isArray(display.lineNumbers) ? display.lineNumbers : undefined;
+      const picked = sampled && all.length === lines.length ? sampled.picked : all.slice(0, limits.maxLines - 1).map((_, i) => i);
+      const displayLines = picked.map(i => all[i] ?? "");
+      const lineNumbers = allNumbers ? picked.map(i => allNumbers[i] ?? i + 1) : undefined;
       details.displayContent = { ...display, text: `${displayLines.join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`, ...(lineNumbers ? { lineNumbers: [...lineNumbers, (lineNumbers.at(-1) ?? 0) + 1] } : {}) };
     }
     const path = event.input?.path ?? event.input?.file_path;

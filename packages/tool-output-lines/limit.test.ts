@@ -49,6 +49,26 @@ describe("tool output line limit", () => {
     expect((huge?.content[0] as { text: string }).text.split("\n").length).toBeLessThanOrEqual(4);
   });
 
+  test("read artifact is saved without N| prefixes so reading it back does not double them", async () => {
+    let saved = "";
+    const text = Array.from({ length: 40 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n");
+    const ctx = { sessionManager: { saveArtifact: async (value: string) => { saved = value; return "5"; } } };
+    await limitResult({ toolName: "read", input: { path: "/x" }, content: [{ type: "text", text }], details: {} }, ctx, { maxLines: 10, maxPreviewChars: 2000, mode: "head", before: 0, after: 0 });
+    expect(saved.split("\n")[0]).toBe("row 1");
+    expect(saved.split("\n")).toHaveLength(40);
+  });
+
+  test("stride mode shows the same sampled lines in the terminal preview of read", async () => {
+    const text = Array.from({ length: 100 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n");
+    const plain = Array.from({ length: 100 }, (_, i) => `row ${i + 1}`).join("\n");
+    const ctx = { sessionManager: { saveArtifact: async () => "5" } };
+    const out = await limitResult({ toolName: "read", input: { path: "/x" }, content: [{ type: "text", text }], details: { displayContent: { text: plain, startLine: 1, lineNumbers: Array.from({ length: 100 }, (_, i) => i + 1) } } }, ctx, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+    const display = out!.details!.displayContent as { text: string; lineNumbers: number[] };
+    expect(display.text.split("\n")[0]).toBe("row 1");
+    expect(display.text.split("\n")[8]).toBe("row 100");
+    expect(display.lineNumbers.slice(0, 9)).toEqual([1, 13, 26, 38, 51, 63, 75, 88, 100]);
+  });
+
   test("slash command accepts context tokens together with mode", () => {
     expect(parseCommand("stride context=2", { off: false }).next).toEqual({ off: false, mode: "stride", before: 2, after: 2 });
     expect(parseCommand("before=1 after=3", { off: false }).next).toEqual({ off: false, before: 1, after: 3 });
