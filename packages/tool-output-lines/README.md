@@ -17,6 +17,8 @@ Configure `$XDG_CONFIG_HOME/omp/tool-output-lines.json`, or `~/.config/omp/tool-
 }
 ```
 
+Change the limit for the current session with `/tool-lines`: `off` stops truncation, `<N>` sets the line limit (minimum 2), `on` or `reset` returns to the config file limits, and no argument shows the state. The override lasts until the session ends and does not change the config file.
+
 Global limits are required; per-tool overrides are optional and inherit any omitted field. Tool names are exact. The minimum line limit is 2 and the minimum character limit is 1. Invalid configuration falls back to the defaults. Changes apply to the next tool result.
 
 If the session cannot save an artifact, the extension leaves the result unchanged. Existing tool-side truncation happens first; the saved output is the result the extension receives.

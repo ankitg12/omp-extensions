@@ -26,8 +26,8 @@ export async function loadLimits(path = configPath, toolName = "") {
 }
 
 type Block = { type: string; text?: string; [key: string]: unknown };
-type Result = { toolName: string; content: Block[]; details?: Record<string, unknown>; input?: { path?: unknown; file_path?: unknown } };
-type Context = { sessionManager: { saveArtifact(text: string, toolType: string): Promise<string | undefined> } };
+export type Result = { toolName: string; content: Block[]; details?: Record<string, unknown>; input?: { path?: unknown; file_path?: unknown } };
+export type Context = { sessionManager: { saveArtifact(text: string, toolType: string): Promise<string | undefined> } };
 
 export async function limitResult(event: Result, ctx: Context, limits = defaults) {
   const text = event.content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n");
@@ -97,6 +97,38 @@ export async function limitResult(event: Result, ctx: Context, limits = defaults
   return { content: [{ type: "text", text: `${preview}\n${notice}` }, ...nonText], ...(details ? { details } : {}) };
 }
 
-export default function toolOutputLines(pi: { on: (name: string, handler: (event: Result, ctx: Context) => Promise<unknown>) => void }) {
-  pi.on("tool_result", async (event, ctx) => limitResult(event, ctx, await loadLimits(configPath, event.toolName)));
+export type Override = { off: boolean; maxLines?: number };
+
+export function parseCommand(args: string, current: Override): { next: Override; message: string } {
+  const arg = args.trim().toLowerCase();
+  const describe = (o: Override) => (o.off ? "off (no truncation)" : o.maxLines ? `maxLines=${o.maxLines}` : "config file limits");
+  if (arg === "" || arg === "status") return { next: current, message: `tool-output-lines: ${describe(current)}` };
+  if (arg === "off") return { next: { off: true }, message: "tool-output-lines: off for this session" };
+  if (arg === "on" || arg === "reset") return { next: { off: false }, message: "tool-output-lines: config file limits restored" };
+  const n = Number(arg);
+  if (Number.isSafeInteger(n) && n >= 2) return { next: { off: false, maxLines: n }, message: `tool-output-lines: maxLines=${n} for this session` };
+  return { next: current, message: "usage: /tool-lines [status|off|on|reset|<lines >= 2>]" };
+}
+
+type Pi = {
+  on: (name: string, handler: (event: Result, ctx: Context) => Promise<unknown>) => void;
+  registerCommand?: (name: string, def: { description?: string; handler: (args: string, ctx: { ui: { notify(message: string, level?: string): void } }) => Promise<void> }) => void;
+};
+
+export default function toolOutputLines(pi: Pi) {
+  let override: Override = { off: false };
+  pi.on("tool_result", async (event, ctx) => {
+    if (override.off) return;
+    const limits = await loadLimits(configPath, event.toolName);
+    if (override.maxLines) limits.maxLines = override.maxLines;
+    return limitResult(event, ctx, limits);
+  });
+  pi.registerCommand?.("tool-lines", {
+    description: "Session tool-output limit: status | off | on | <lines>",
+    handler: async (args, ctx) => {
+      const { next, message } = parseCommand(args, override);
+      override = next;
+      ctx.ui.notify(message, "info");
+    },
+  });
 }

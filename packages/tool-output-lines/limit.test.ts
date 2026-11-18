@@ -3,11 +3,33 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { limitResult, loadLimits } from "./limit.ts";
+import toolOutputLines, { limitResult, loadLimits, parseCommand, type Context, type Result } from "./limit.ts";
 
 const result = (text: string) => ({ toolName: "bash", content: [{ type: "text", text }] });
 
 describe("tool output line limit", () => {
+  test("slash command parses status, off, on and a line count", () => {
+    const base = { off: false };
+    expect(parseCommand("off", base).next).toEqual({ off: true });
+    expect(parseCommand("25", base).next).toEqual({ off: false, maxLines: 25 });
+    expect(parseCommand("on", { off: true }).next).toEqual({ off: false });
+    expect(parseCommand("1", base).next).toBe(base);
+    expect(parseCommand("", { off: true }).message).toContain("off");
+  });
+
+  test("/tool-lines off stops truncation for the session", async () => {
+    const handlers: Record<string, (event: Result, ctx: Context) => Promise<unknown>> = {};
+    let command: (args: string, ctx: { ui: { notify(message: string, level?: string): void } }) => Promise<void> = async () => {};
+    toolOutputLines({ on: (name, h) => { handlers[name] = h; }, registerCommand: (_n, def) => { command = def.handler; } });
+    const ctx = { sessionManager: { saveArtifact: async () => "1" }, ui: { notify() {} } } satisfies Context & { ui: { notify(): void } };
+    const long = Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n");
+    expect(await handlers.tool_result(result(long), ctx)).toBeDefined();
+    await command("off", ctx);
+    expect(await handlers.tool_result(result(long), ctx)).toBeUndefined();
+    await command("on", ctx);
+    expect(await handlers.tool_result(result(long), ctx)).toBeDefined();
+  });
+
   test("loads user limits and applies them", async () => {
     const dir = await mkdtemp(join(tmpdir(), "output-limit-"));
     try {
