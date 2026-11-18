@@ -17,7 +17,15 @@ Configure `$XDG_CONFIG_HOME/omp/tool-output-lines.json`, or `~/.config/omp/tool-
 }
 ```
 
-Change the limit for the current session with `/tool-lines`: `off` stops truncation, `<N>` sets the line limit (minimum 2), `on` or `reset` returns to the config file limits, and no argument shows the state. The override lasts until the session ends and does not change the config file.
+## Modes: head and stride
+
+`"mode": "head"` (default) keeps the first lines. `"mode": "stride"` keeps evenly spaced lines from the whole output, always including the first and the last. Each sampled line shows its original line number (added when the tool gave none), and the notice reads `[sampled K of N evenly spaced lines ...]`. This gives the agent a zoom-out view; it zooms in with `read artifact://ID:START-END` or `read <path>:START-END`. When any configured mode is `stride`, the extension appends a short note about this to the system prompt, so the agent knows the lines are not contiguous. Set `mode` globally or per tool:
+
+```json
+{ "maxLines": 10, "maxPreviewChars": 2000, "tools": { "read": { "mode": "stride" } } }
+```
+
+Change the limit for the current session with `/tool-lines`: `off` stops truncation, `<N>` sets the line limit (minimum 2), `head` or `stride` sets the mode, `on` or `reset` returns to the config file limits, and no argument shows the state. The override lasts until the session ends and does not change the config file.
 
 Global limits are required; per-tool overrides are optional and inherit any omitted field. Tool names are exact. The minimum line limit is 2 and the minimum character limit is 1. Invalid configuration falls back to the defaults. Changes apply to the next tool result.
 

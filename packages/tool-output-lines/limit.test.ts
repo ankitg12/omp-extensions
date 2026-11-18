@@ -17,10 +17,46 @@ describe("tool output line limit", () => {
     expect(parseCommand("", { off: true }).message).toContain("off");
   });
 
+  test("stride mode keeps first and last lines, original numbers, and says it is sampled", async () => {
+    const numbered = Array.from({ length: 100 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n");
+    const out = await limitResult(result(numbered), { sessionManager: { saveArtifact: async () => "7" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride" });
+    const text = (out?.content[0] as { text: string }).text.split("\n");
+    expect(text).toHaveLength(10);
+    expect(text[0]).toBe("1|row 1");
+    expect(text[8]).toBe("100|row 100");
+    expect(text[9]).toContain("sampled 9 of 100");
+    expect(text[9]).toContain("artifact://7:START-END");
+  });
+
+  test("stride mode numbers lines that arrive without numbers", async () => {
+    const plain = Array.from({ length: 40 }, (_, i) => `log ${i + 1}`).join("\n");
+    const out = await limitResult(result(plain), { sessionManager: { saveArtifact: async () => "2" } }, { maxLines: 5, maxPreviewChars: 2000, mode: "stride" });
+    const text = (out?.content[0] as { text: string }).text.split("\n");
+    expect(text.slice(0, 4)).toEqual(["1| log 1", "14| log 14", "27| log 27", "40| log 40"]);
+  });
+
+  test("/tool-lines stride adds a system-prompt note; head removes it", async () => {
+    const promptHooks: Array<(event: { systemPrompt?: unknown }) => Promise<unknown>> = [];
+    let command: (args: string, ctx: { ui: { notify(message: string): void } }) => Promise<void> = async () => {};
+    toolOutputLines({
+      on: ((name: string, h: (...args: never[]) => Promise<unknown>) => { if (name === "before_agent_start") promptHooks.push(h as never); }) as never,
+      registerCommand: (_n, def) => { command = def.handler; },
+    });
+    const ui = { ui: { notify() {} } };
+    await command("stride", ui);
+    expect(JSON.stringify(await promptHooks[0]({ systemPrompt: "base" }))).toContain("evenly spaced sample");
+    await command("head", ui);
+    expect(await promptHooks[0]({ systemPrompt: "base" })).toBeUndefined();
+  });
+
   test("/tool-lines off stops truncation for the session", async () => {
     const handlers: Record<string, (event: Result, ctx: Context) => Promise<unknown>> = {};
+    const promptHooks: Array<(event: { systemPrompt?: unknown }) => Promise<unknown>> = [];
     let command: (args: string, ctx: { ui: { notify(message: string, level?: string): void } }) => Promise<void> = async () => {};
-    toolOutputLines({ on: (name, h) => { handlers[name] = h; }, registerCommand: (_n, def) => { command = def.handler; } });
+    toolOutputLines({
+      on: ((name: string, h: (...args: never[]) => Promise<unknown>) => { if (name === "tool_result") handlers[name] = h as never; else promptHooks.push(h as never); }) as never,
+      registerCommand: (_n, def) => { command = def.handler; },
+    });
     const ctx = { sessionManager: { saveArtifact: async () => "1" }, ui: { notify() {} } } satisfies Context & { ui: { notify(): void } };
     const long = Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n");
     expect(await handlers.tool_result(result(long), ctx)).toBeDefined();
@@ -38,7 +74,7 @@ describe("tool output line limit", () => {
       const limits = await loadLimits(path);
       const output = await limitResult(result("one\ntwo\nthree\nfour"), { sessionManager: { saveArtifact: async () => "1" } }, limits);
       expect(output!.content[0].text!.split("\n")).toHaveLength(3);
-      expect(limits).toEqual({ maxLines: 3, maxPreviewChars: 30 });
+      expect(limits).toEqual({ maxLines: 3, maxPreviewChars: 30, mode: "head" });
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
@@ -47,9 +83,9 @@ describe("tool output line limit", () => {
     try {
       const path = join(dir, "config.json");
       await writeFile(path, JSON.stringify({ maxLines: 10, maxPreviewChars: 2000, tools: { bash: { maxLines: 3 }, grep: { maxPreviewChars: 300 } } }));
-      expect(await loadLimits(path, "bash")).toEqual({ maxLines: 3, maxPreviewChars: 2000 });
-      expect(await loadLimits(path, "grep")).toEqual({ maxLines: 10, maxPreviewChars: 300 });
-      expect(await loadLimits(path, "read")).toEqual({ maxLines: 10, maxPreviewChars: 2000 });
+      expect(await loadLimits(path, "bash")).toEqual({ maxLines: 3, maxPreviewChars: 2000, mode: "head" });
+      expect(await loadLimits(path, "grep")).toEqual({ maxLines: 10, maxPreviewChars: 300, mode: "head" });
+      expect(await loadLimits(path, "read")).toEqual({ maxLines: 10, maxPreviewChars: 2000, mode: "head" });
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
@@ -61,7 +97,7 @@ describe("tool output line limit", () => {
       await writeFile(join(configDir, "tool-output-lines.json"), JSON.stringify({ maxLines: 3, maxPreviewChars: 100 }));
       const child = spawnSync(process.execPath, ["-e", 'import { loadLimits } from "./packages/tool-output-lines/limit.ts"; console.log(JSON.stringify(await loadLimits()))'], { cwd: process.cwd(), env: { ...process.env, XDG_CONFIG_HOME: dir }, encoding: "utf8" });
       expect(child.status).toBe(0);
-      expect(JSON.parse(child.stdout)).toEqual({ maxLines: 3, maxPreviewChars: 100 });
+      expect(JSON.parse(child.stdout)).toEqual({ maxLines: 3, maxPreviewChars: 100, mode: "head" });
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
