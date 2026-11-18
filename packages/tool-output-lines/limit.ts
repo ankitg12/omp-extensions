@@ -53,10 +53,21 @@ function sample(lines: string[], limits: Limits, startLine = 1, raw = false) {
   return { ...out, text: out.text.slice(0, limits.maxPreviewChars) };
 }
 
+function matchingReadDisplay(event: Result, text: string) {
+  const display = event.details?.displayContent;
+  if (event.toolName !== "read" || !display || typeof display !== "object" || !("text" in display) || typeof display.text !== "string") return;
+  const { lineNumbers: _lineNumbers, ...rest } = display as Record<string, unknown>;
+  return { ...event.details, contentType: "text/plain", displayContent: { ...rest, startLine: 1, text } };
+}
+
 export async function limitResult(event: Result, ctx: Context, limits: Limits = defaults) {
   const text = event.content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n");
+  const originalDisplay = () => {
+    const details = matchingReadDisplay(event, text);
+    return details ? { content: event.content, details } : undefined;
+  };
   const allLines = text.split(/\r?\n/);
-  if (allLines.length <= limits.maxLines && text.length <= limits.maxPreviewChars) return;
+  if (allLines.length <= limits.maxLines && text.length <= limits.maxPreviewChars) return originalDisplay();
   const candidate = event.toolName === "read" ? allLines.at(-1)?.match(/^\[Showing lines .+ of (\d+); (\d+) middle lines \([^\]]+\) elided\..*Read artifact:\/\/([^\s\]]+) for full output\]$/) : null;
   const meta = event.details?.meta;
   const truncation = meta && typeof meta === "object" && "truncation" in meta ? meta.truncation : undefined;
@@ -69,7 +80,7 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   const selector = event.toolName === "read" ? String(event.input?.path ?? event.input?.file_path ?? "").replace(/^[A-Za-z]:/, "").match(/:(\d+)(?:-(\d+)|\+(\d+))?(?::raw)?$/) : null;
   if (selector) {
     const size = selector[2] ? Number(selector[2]) - Number(selector[1]) + 1 : selector[3] ? Number(selector[3]) : 1;
-    if (size <= limits.maxLines) return;
+    if (size <= limits.maxLines) return originalDisplay();
   }
 
   const path = event.input?.path ?? event.input?.file_path;
@@ -104,7 +115,7 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     if (display && typeof display === "object" && "text" in display && typeof display.text === "string") {
       // Show the exact text the model receives, line-number prefixes included, so a regression is visible.
       const { lineNumbers: _gutter, ...rest } = display as Record<string, unknown>;
-      details.displayContent = { ...rest, text: `${preview}\n${notice}` };
+      details.displayContent = { ...rest, startLine: 1, text: `${preview}\n${notice}` };
       details.contentType = "text/plain"; // Markdown rendering would join the `N|` lines into paragraphs.
     }
     if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;

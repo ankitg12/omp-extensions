@@ -72,6 +72,13 @@ describe("tool output line limit", () => {
     expect(saved).toBe(text);
   });
 
+  test("short read displays the exact model text with a one-based row gutter", async () => {
+    const text = "alpha\nbeta";
+    const out = await limitResult({ toolName: "read", input: { path: "/x:220-221:raw" }, content: [{ type: "text", text }], details: { displayContent: { text, startLine: 220, lineNumbers: [220, 221] }, contentType: "text/plain" } }, { sessionManager: { saveArtifact: async () => "5" } });
+    expect(out!.content).toEqual([{ type: "text", text }]);
+    expect(out!.details!.displayContent).toEqual({ text, startLine: 1 });
+  });
+
   test("sampled raw ranges show source numbers to the model", async () => {
     const text = Array.from({ length: 51 }, (_, i) => `row ${i + 220}`).join("\n");
     for (const path of ["/x:220-270:raw", "/x:raw:220-270"]) {
@@ -84,7 +91,16 @@ describe("tool output line limit", () => {
       const display = out!.details!.displayContent;
       if (!display || typeof display !== "object" || !("text" in display)) throw new Error("missing display");
       expect(display.text).toBe(block.text);
+      expect("startLine" in display && display.startLine).toBe(1);
+      expect("lineNumbers" in display).toBe(false);
     }
+  });
+
+  test("in-limit range with added context keeps model text and uses row gutter", async () => {
+    const text = Array.from({ length: 14 }, (_, i) => `${i + 39}|row ${i + 39}`).join("\n");
+    const out = await limitResult({ toolName: "read", input: { path: "/x:40-49" }, content: [{ type: "text", text }], details: { displayContent: { text, startLine: 39, lineNumbers: [39] } } }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+    expect(out!.content).toEqual([{ type: "text", text }]);
+    expect(out!.details!.displayContent).toEqual({ text, startLine: 1 });
   });
 
   test("sampled raw source lines keep numeric pipe content", async () => {
