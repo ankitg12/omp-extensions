@@ -58,6 +58,27 @@ describe("tool output line limit", () => {
     expect(saved.split("\n")).toHaveLength(40);
   });
 
+  test("stride preserves skill provenance and does not add duplicate source numbers", async () => {
+    const text = `[Skill file: /skills/example/SKILL.md]\n${Array.from({ length: 40 }, (_, i) => `${i + 1}|body ${i + 1}`).join("\n")}`;
+    const out = await limitResult({ toolName: "read", input: { path: "skill://example" }, content: [{ type: "text", text }] }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+    const block = out!.content[0];
+    if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
+    expect(block.text.split("\n")[0]).toBe("[Skill file: /skills/example/SKILL.md]");
+    expect(block.text).toContain("5|body 5");
+    expect(block.text).not.toMatch(/\d+\|\s*\d+\|/);
+  });
+
+  test("a short explicit range cannot bypass the character budget", async () => {
+    const text = Array.from({ length: 3 }, (_, i) => `${i + 32}|${"x".repeat(100)}`).join("\n");
+    let saved = "";
+    const out = await limitResult({ toolName: "read", input: { path: "/x:32-34" }, content: [{ type: "text", text }], details: { displayContent: { text, startLine: 32 } } }, { sessionManager: { saveArtifact: async value => { saved = value; return "5"; } } }, { maxLines: 10, maxPreviewChars: 80, mode: "stride", before: 0, after: 0 });
+    expect(saved).toContain("x".repeat(100));
+    const block = out!.content[0];
+    if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
+    expect(block.text).toContain("artifact://5");
+    expect(block.text.length).toBeLessThan(text.length);
+  });
+
   test("skill provenance does not prevent removing generated read prefixes from artifacts", async () => {
     const text = "[Skill file: /tmp/SKILL.md]\n1|---\n2|name: example\n3|---";
     let saved = "";

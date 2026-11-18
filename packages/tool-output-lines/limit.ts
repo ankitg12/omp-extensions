@@ -35,7 +35,8 @@ export type Context = { sessionManager: { saveArtifact(text: string, toolType: s
 // Evenly spaced sample points (first and last included), each with `before`/`after` context lines
 // like grep -B/-A. Each line carries its original number. Total stays within maxLines - 1.
 function sample(lines: string[], limits: Limits, startLine = 1, raw = false) {
-  const numbered = !raw && /^\s*\d+\|/.test(lines[0] ?? "");
+  const first = /^\[Skill file: .*\]$/.test(lines[0] ?? "") ? 1 : 0;
+  const numbered = !raw && /^\s*\d+\|/.test(lines[first] ?? "");
   const budget = limits.maxLines - 1;
   const build = (points: number, before: number, after: number) => {
     const keep = new Set<number>();
@@ -44,7 +45,7 @@ function sample(lines: string[], limits: Limits, startLine = 1, raw = false) {
       for (let i = Math.max(0, center - before); i <= Math.min(lines.length - 1, center + after); i++) keep.add(i);
     }
     const picked = [...keep].sort((a, b) => a - b);
-    return { picked, text: picked.map(i => (numbered ? lines[i] : `${i + startLine}| ${lines[i]}`)).join("\n") };
+    return { picked, text: picked.map(i => (numbered || i < first ? lines[i] : `${i + startLine}| ${lines[i]}`)).join("\n") };
   };
   let points = Math.max(2, Math.floor(budget / (1 + limits.before + limits.after)));
   let out = build(points, limits.before, limits.after);
@@ -80,7 +81,7 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   const selector = event.toolName === "read" ? String(event.input?.path ?? event.input?.file_path ?? "").replace(/^[A-Za-z]:/, "").match(/:(\d+)(?:-(\d+)|\+(\d+))?(?::raw)?$/) : null;
   if (selector) {
     const size = selector[2] ? Number(selector[2]) - Number(selector[1]) + 1 : selector[3] ? Number(selector[3]) : 1;
-    if (size <= limits.maxLines) return originalDisplay();
+    if (size <= limits.maxLines && text.length <= limits.maxPreviewChars) return originalDisplay();
   }
 
   const path = event.input?.path ?? event.input?.file_path;
@@ -184,7 +185,7 @@ export function parseCommand(args: string, current: Override): { next: Override;
 }
 
 const exactReadNote = (maxLines: number) =>
-  `Tool results longer than ${maxLines} lines may be shortened. To see exact source lines, request a read range of at most ${maxLines} lines: \`read <path>:START-END\`, or \`read artifact://ID:START-END\` for a saved result.`;
+  `Tool results may be shortened by line or character limits. To see exact source lines, request a read range of at most ${maxLines} lines: \`read <path>:START-END\`, or \`read artifact://ID:START-END\` for a saved result. Long lines can still exceed the character limit.`;
 
 const strideNote = [
   "Tool results longer than the limit may arrive as an evenly spaced sample of lines (each sample point may carry a few context lines), not a contiguous block.",
