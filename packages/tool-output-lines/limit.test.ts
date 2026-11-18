@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import toolOutputLines, { limitResult, loadLimits, parseCommand, type Context, type Result } from "./limit.ts";
-import { formatOutline } from "./outline.ts";
 
 const result = (text: string) => ({ toolName: "bash", content: [{ type: "text", text }] });
 
@@ -80,69 +79,23 @@ describe("tool output line limit", () => {
     expect(notice).toBe("[sampled 9/40 lines · artifact://5]");
   });
 
-  test("stride read preview preserves structural summary ranges and source positions", async () => {
-    const text = "1|one\n2-5|folded\n6|six\n…\n8|eight\n9-12|folded two\n13|thirteen";
-    let saved = "";
-    const out = await limitResult({ toolName: "read", content: [{ type: "text", text }], details: { summary: { elidedSpans: 2 }, displayContent: { text: "one\nfolded\nsix\n…\neight\nfolded two\nthirteen", startLine: 1, lineNumbers: [1, null, 6, null, 8, null, 13] } } }, { sessionManager: { saveArtifact: async (value: string) => { saved = value; return "5"; } } }, { maxLines: 6, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
-    const display = out!.details!.displayContent as { text: string; lineNumbers: (number | null)[] };
-    expect(saved).not.toContain("2-5|");
-    expect(display.text).not.toContain("2-5|");
-    expect(display.lineNumbers).toContain(null);
-  });
-
-  test("stride mode shows the same sampled lines in the terminal preview of read", async () => {
+  test("terminal preview of read shows exactly the text the model receives, line numbers included", async () => {
     const text = Array.from({ length: 100 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n");
     const plain = Array.from({ length: 100 }, (_, i) => `row ${i + 1}`).join("\n");
     const ctx = { sessionManager: { saveArtifact: async () => "5" } };
-    const out = await limitResult({ toolName: "read", input: { path: "/x" }, content: [{ type: "text", text }], details: { displayContent: { text: plain, startLine: 1, lineNumbers: Array.from({ length: 100 }, (_, i) => i + 1) } } }, ctx, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
-    const display = out!.details!.displayContent as { text: string; lineNumbers: number[] };
-    expect(display.text.split("\n")[0]).toBe("row 1");
-    expect(display.text.split("\n")[8]).toBe("row 100");
-    expect(display.lineNumbers.slice(0, 9)).toEqual([1, 13, 26, 38, 51, 63, 75, 88, 100]);
+    for (const mode of ["stride", "head"] as const) {
+      const out = await limitResult({ toolName: "read", content: [{ type: "text", text }], details: { displayContent: { text: plain, startLine: 1, lineNumbers: Array.from({ length: 100 }, (_, i) => i + 1) } } }, ctx, { maxLines: 10, maxPreviewChars: 2000, mode, before: 0, after: 0 });
+      const display = out!.details!.displayContent as { text: string; lineNumbers?: unknown };
+      expect(display.text).toBe((out!.content[0] as { text: string }).text);
+      expect(display.text.split("\n")[0]).toBe("1|row 1");
+      expect(display.lineNumbers).toBeUndefined();
+    }
   });
 
-  test("stride preview mirrors sampled read content when a footer is absent from displayContent", async () => {
-    const rows = Array.from({ length: 40 }, (_, i) => `${i + 1}|row ${i + 1}`);
-    const text = `${rows.join("\n")}\n\n[Some lines truncated]`;
-    const plain = Array.from({ length: 40 }, (_, i) => `row ${i + 1}`).join("\n");
-    const out = await limitResult({ toolName: "read", content: [{ type: "text", text }], details: { displayContent: { text: plain, startLine: 1, lineNumbers: Array.from({ length: 40 }, (_, i) => i + 1) } } }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 1, after: 1 });
-    const visible = out!.content[0].text!.split("\n");
-    const display = out!.details!.displayContent as { text: string; lineNumbers: number[] };
-    expect(display.text.split("\n")).toEqual(visible.map(line => line.replace(/^\s*\d+\|/, "")));
-  });
-
-  test("formatOutline gives 1-based source ranges and trims to the budget", () => {
-    const json = JSON.stringify([{ items: [
-      { signature: "export type A = 1;", range: { start: { line: 5 }, end: { line: 5 } } },
-      { signature: "export function f(a: string) {\n  body", range: { start: { line: 10 }, end: { line: 20 } } },
-      { signature: "export const g = 2;", range: { start: { line: 30 }, end: { line: 30 } } },
-    ] }]);
-    expect(formatOutline(json, 10)).toEqual(["6: export type A = 1;", "11-21: export function f(a: string) {", "31: export const g = 2;"]);
-    expect(formatOutline(json, 2)).toEqual(["6: export type A = 1;", "… 2 more symbols"]);
-    expect(formatOutline("not json", 5)).toBeUndefined();
-    expect(formatOutline("[]", 5)).toBeUndefined();
-  });
-
-  test("outline mode replaces a long read of code with a symbol index; ranged reads fall back to stride", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "outline-"));
-    const file = join(dir, "sample.ts");
-    await writeFile(file, Array.from({ length: 60 }, (_, i) => (i % 10 === 0 ? `export function f${i}() {` : i % 10 === 9 ? "}" : "  const x = 1;")).join("\n"));
-    const numbered = Array.from({ length: 60 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n");
-    const ctx = { sessionManager: { saveArtifact: async () => "9" } };
-    const limits = { maxLines: 10, maxPreviewChars: 2000, mode: "outline" as const, before: 0, after: 0 };
-    const out = await limitResult({ toolName: "read", input: { path: file }, content: [{ type: "text", text: numbered }], details: {} }, ctx, limits);
-    const text = (out?.content[0] as { text: string }).text;
-    expect(text).toContain("1-10: export function f0() {");
-    expect(text).toContain("[outline: 6 symbols of a 60-line result");
-    const ranged = await limitResult({ toolName: "read", input: { path: `${file}:5-40` }, content: [{ type: "text", text: numbered }], details: {} }, ctx, limits);
-    expect((ranged?.content[0] as { text: string }).text).toContain("sampled");
-    const missing = await limitResult({ toolName: "read", input: { path: join(dir, "nope.ts") }, content: [{ type: "text", text: numbered }], details: {} }, ctx, limits);
-    expect((missing?.content[0] as { text: string }).text).toContain("sampled");
-    await rm(dir, { recursive: true });
-  });
-
-  test("slash command accepts the outline mode", () => {
-    expect(parseCommand("outline", { off: false }).next).toEqual({ off: false, mode: "outline" });
+  test("a read that OMP already elided passes through untouched", async () => {
+    const text = `${Array.from({ length: 100 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n")}\n[Showing lines 1-100 and 168-251 of 251; 67 middle lines (3.2KB) elided. Read artifact://68 for full output]`;
+    const out = await limitResult({ toolName: "read", content: [{ type: "text", text }], details: {} }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+    expect(out).toBeUndefined();
   });
 
   test("slash command accepts context tokens together with mode", () => {
@@ -225,10 +178,9 @@ describe("tool output line limit", () => {
     const ctx = { sessionManager: { saveArtifact: async () => "7" } };
     const limits = { maxLines: 10, maxPreviewChars: 2000, mode: "head" as const, before: 0, after: 0 };
     const read = await limitResult({ toolName: "read", input: { path: "artifact://4" }, content: [{ type: "text", text }], details: { resolvedPath: "/long/path", displayContent: { text, startLine: 1, lineNumbers: Array.from({ length: 40 }, (_, i) => i + 1) } } }, ctx, limits);
-    const display = read!.details!.displayContent as { text: string; lineNumbers: number[] };
+    const display = read!.details!.displayContent as { text: string };
     expect(display.text.split("\n")).toHaveLength(10);
     expect(display.text).toContain("artifact://7");
-    expect(display.lineNumbers).toHaveLength(10);
     expect(read!.details!.resolvedPath).toBeUndefined();
     const grep = await limitResult({ toolName: "grep", content: [{ type: "text", text }], details: { displayContent: text } }, ctx, limits);
     expect((grep!.details!.displayContent as string).split("\n")).toHaveLength(10);

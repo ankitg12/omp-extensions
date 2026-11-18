@@ -1,10 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { outlineFile } from "./outline.ts";
 
-const modes = ["head", "stride", "outline"];
-export type Mode = "head" | "stride" | "outline";
+const modes = ["head", "stride"];
+export type Mode = "head" | "stride";
 export type Limits = { maxLines: number; maxPreviewChars: number; mode: Mode; before: number; after: number };
 const defaults: Limits = { maxLines: 10, maxPreviewChars: 2000, mode: "head", before: 0, after: 0 };
 const xdgConfig = process.env.XDG_CONFIG_HOME;
@@ -58,6 +57,8 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   const text = event.content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n");
   const lines = text.split(/\r?\n/);
   if (lines.length <= limits.maxLines && text.length <= limits.maxPreviewChars) return;
+  // OMP already shortened this read (structural summary or head+tail elision); a second cut would hide its re-read hints.
+  if (event.toolName === "read" && /\[Showing lines [\d, and-]+ of \d+;|\[…\d+ln elided/.test(text)) return;
 
   let id: string | undefined;
   try {
@@ -71,16 +72,9 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   }
   if (id === undefined) return;
 
-  const sourcePath = event.input?.path ?? event.input?.file_path;
-  const rangedRead = typeof sourcePath === "string" && /:\d+/.test(sourcePath.replace(/^[A-Za-z]:/, ""));
-  const outline = limits.mode === "outline" && event.toolName === "read" && typeof sourcePath === "string" && !sourcePath.includes("://") && !rangedRead
-    ? await outlineFile(sourcePath.replace(/:raw$/, ""), limits.maxLines - 1)
-    : undefined;
-  const sampled = !outline && limits.mode !== "head" && lines.length > 2 ? sample(lines, limits) : undefined;
-  const preview = outline ? outline.join("\n").slice(0, limits.maxPreviewChars) : sampled ? sampled.text : lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
-  const notice = outline
-    ? `[outline: ${outline.length} symbols of a ${lines.length}-line result · START-END are source lines: read ${sourcePath}:START-END · saved result: artifact://${id}]`
-    : sampled
+  const sampled = limits.mode !== "head" && lines.length > 2 ? sample(lines, limits) : undefined;
+  const preview = sampled ? sampled.text : lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
+  const notice = sampled
     ? `[sampled ${sampled.picked.length}/${lines.length} lines · artifact://${id}]`
     : `[${lines.length} lines · full output: artifact://${id}]`;
   const nonText = event.content.filter(block => block.type !== "text");
@@ -88,22 +82,9 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   if (details && event.toolName === "read") {
     const display = details.displayContent;
     if (display && typeof display === "object" && "text" in display && typeof display.text === "string") {
-      const all = display.text.split(/\r?\n/);
-      const allNumbers = "lineNumbers" in display && Array.isArray(display.lineNumbers) ? display.lineNumbers : undefined;
-      if (outline) {
-        details.displayContent = { ...display, text: `${preview}\n${notice}`, lineNumbers: [...preview.split("\n").map(() => null), null] };
-      } else if (sampled) {
-        const visible = preview.split("\n");
-        const lineNumbers = visible.map(line => {
-          const match = line.match(/^\s*(\d+)(?:-\d+)?\|/);
-          return match ? Number(match[1]) : null;
-        });
-        details.displayContent = { ...display, text: `${visible.map(line => line.replace(/^\s*\d+(?:-\d+)?\|/, "")).join("\n")}\n${notice}`, lineNumbers: [...lineNumbers, null] };
-      } else {
-        const displayLines = all.slice(0, limits.maxLines - 1);
-        const lineNumbers = allNumbers?.slice(0, displayLines.length);
-        details.displayContent = { ...display, text: `${displayLines.join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`, ...(lineNumbers ? { lineNumbers: [...lineNumbers, (lineNumbers.at(-1) ?? 0) + 1] } : {}) };
-      }
+      // Show the exact text the model receives, line-number prefixes included, so a regression is visible.
+      const { lineNumbers: _gutter, ...rest } = display as Record<string, unknown>;
+      details.displayContent = { ...rest, text: `${preview}\n${notice}` };
     }
     const path = event.input?.path ?? event.input?.file_path;
     if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;
@@ -161,12 +142,12 @@ export function parseCommand(args: string, current: Override): { next: Override;
   for (const token of arg.split(/\s+/)) {
     const [key, value = ""] = token.split("=");
     const count = Number(value);
-    if (token === "stride" || token === "head" || token === "outline") next.mode = token;
+    if (token === "stride" || token === "head") next.mode = token;
     else if (/^\d+$/.test(token) && Number(token) >= 2) next.maxLines = Number(token);
     else if (["before", "after", "context"].includes(key) && /^\d+$/.test(value)) {
       if (key !== "after") next.before = count;
       if (key !== "before") next.after = count;
-    } else return { next: current, message: "usage: /tool-lines [|status|off|on|reset|head|stride|outline|<lines >= 2>|before=N|after=N|context=N]" };
+    } else return { next: current, message: "usage: /tool-lines [|status|off|on|reset|head|stride|<lines >= 2>|before=N|after=N|context=N]" };
   }
   return { next, message: `tool-output-lines: ${describe(next)} for this session` };
 }
@@ -177,7 +158,6 @@ const exactReadNote = (maxLines: number) =>
 const strideNote = [
   "Tool results longer than the limit may arrive as an evenly spaced sample of lines (each sample point may carry a few context lines), not a contiguous block.",
   "Each sampled line starts with its original line number; the first and last lines are kept; the result ends with a [sampled K/N lines · artifact://ID] notice.",
-  "A result starting with [outline: ...] is a symbol index of a code file: each START-END is a source line range, so `read <original-path>:START-END` returns that symbol.",
   "Do not assume skipped lines are empty or irrelevant. For read results, use original source line numbers with the original path; artifact line numbers are offsets in the saved result and may not match source lines. For other results, zoom in with `read artifact://ID:START-END`.",
 ].join(" ");
 
@@ -200,7 +180,7 @@ export default function toolOutputLines(pi: Pi) {
   });
   pi.on("before_agent_start", async event => {
     if (override.off || typeof event.systemPrompt !== "string") return;
-    const sampling = (mode: unknown) => mode === "stride" || mode === "outline";
+    const sampling = (mode: unknown) => mode === "stride";
     let stride = sampling(override.mode);
     if (!stride && override.mode === undefined) {
       try {
@@ -212,7 +192,7 @@ export default function toolOutputLines(pi: Pi) {
     return { systemPrompt: `${event.systemPrompt}\n\n${exactReadNote(maxLines)}${stride ? `\n\n${strideNote}` : ""}` };
   });
   pi.registerCommand?.("tool-lines", {
-    description: "Session tool-output limit: status | off | on | head | stride | outline | <lines>",
+    description: "Session tool-output limit: status | off | on | head | stride | <lines>",
     handler: async (args, ctx) => {
       const { next, message } = parseCommand(args, override);
       override = next;
