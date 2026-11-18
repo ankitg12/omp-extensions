@@ -58,6 +58,20 @@ describe("tool output line limit", () => {
     expect(saved.split("\n")).toHaveLength(40);
   });
 
+  test("skill provenance does not prevent removing generated read prefixes from artifacts", async () => {
+    const text = "[Skill file: /tmp/SKILL.md]\n1|---\n2|name: example\n3|---";
+    let saved = "";
+    await limitResult({ toolName: "read", content: [{ type: "text", text }] }, { sessionManager: { saveArtifact: async value => { saved = value; return "5"; } } }, { maxLines: 2, maxPreviewChars: 2000, mode: "head", before: 0, after: 0 });
+    expect(saved).toBe("[Skill file: /tmp/SKILL.md]\n---\nname: example\n---");
+  });
+
+  test("raw read content beginning with a number and pipe remains unchanged", async () => {
+    const text = "1|payload\n2|payload\n3|payload";
+    let saved = "";
+    await limitResult({ toolName: "read", input: { path: "/tmp/data:raw" }, content: [{ type: "text", text }] }, { sessionManager: { saveArtifact: async value => { saved = value; return "5"; } } }, { maxLines: 2, maxPreviewChars: 2000, mode: "head", before: 0, after: 0 });
+    expect(saved).toBe(text);
+  });
+
   test("read stride notice distinguishes source line numbers from artifact offsets", async () => {
     const text = Array.from({ length: 40 }, (_, i) => `${i + 101}|row ${i + 101}`).join("\n");
     const out = await limitResult({ toolName: "read", input: { path: "/x:101-140" }, content: [{ type: "text", text }], details: {} }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });

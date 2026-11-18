@@ -60,8 +60,10 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
 
   let id: string | undefined;
   try {
-    // `read` text already carries `N|` prefixes; reading the artifact numbers it again, so save it plain.
-    const plain = event.toolName === "read" && /^\s*\d+\|/.test(lines[0] ?? "") ? lines.map(line => line.replace(/^\s*\d+(?:-\d+)?\|/, "")).join("\n") : text;
+    const path = event.input?.path ?? event.input?.file_path;
+    const raw = typeof path === "string" && /(?:^|:)raw(?::|$)/.test(path);
+    const first = /^\[Skill file: .*\]$/.test(lines[0] ?? "") ? 1 : 0;
+    const plain = event.toolName === "read" && !raw && /^\s*\d+\|/.test(lines[first] ?? "") ? lines.map((line, i) => i < first ? line : line.replace(/^\s*\d+(?:-\d+)?\|/, "")).join("\n") : text;
     id = await ctx.sessionManager.saveArtifact(plain, "tool-output");
   } catch {
     return;
