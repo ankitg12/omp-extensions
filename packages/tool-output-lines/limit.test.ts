@@ -68,8 +68,9 @@ describe("tool output line limit", () => {
   test("raw read content beginning with a number and pipe remains unchanged", async () => {
     const text = "1|payload\n2|payload\n3|payload";
     let saved = "";
-    await limitResult({ toolName: "read", input: { path: "/tmp/data:raw" }, content: [{ type: "text", text }] }, { sessionManager: { saveArtifact: async value => { saved = value; return "5"; } } }, { maxLines: 2, maxPreviewChars: 2000, mode: "head", before: 0, after: 0 });
-    expect(saved).toBe(text);
+    const out = await limitResult({ toolName: "read", input: { path: "/tmp/data:raw" }, content: [{ type: "text", text }] }, { sessionManager: { saveArtifact: async value => { saved = value; return "5"; } } }, { maxLines: 2, maxPreviewChars: 2000, mode: "head", before: 0, after: 0 });
+    expect(out).toBeUndefined();
+    expect(saved).toBe("");
   });
 
   test("short read displays the exact model text with a one-based row gutter", async () => {
@@ -79,20 +80,19 @@ describe("tool output line limit", () => {
     expect(out!.details!.displayContent).toEqual({ text, startLine: 1 });
   });
 
-  test("sampled raw ranges show source numbers to the model", async () => {
+  test("raw reads remain byte-for-byte unchanged beyond the preview limit", async () => {
+    const text = Array.from({ length: 51 }, (_, i) => `row ${i + 220}\r`).join("\n");
+    const out = await limitResult({ toolName: "read", input: { path: "/x:220-270:raw" }, content: [{ type: "text", text }], details: { displayContent: { text, startLine: 220 } } }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+    expect(out!.content).toEqual([{ type: "text", text }]);
+    expect(out!.details!.displayContent).toEqual({ text, startLine: 1 });
+  });
+
+  test("raw selector order does not change verbatim content", async () => {
     const text = Array.from({ length: 51 }, (_, i) => `row ${i + 220}`).join("\n");
     for (const path of ["/x:220-270:raw", "/x:raw:220-270"]) {
       const out = await limitResult({ toolName: "read", input: { path }, content: [{ type: "text", text }], details: { displayContent: { text, startLine: 220 } } }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
-      const block = out!.content[0];
-      if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
-      const modelLines = block.text.split("\n");
-      expect(modelLines[0]).toBe("220| row 220");
-      expect(modelLines.at(-2)).toBe("270| row 270");
-      const display = out!.details!.displayContent;
-      if (!display || typeof display !== "object" || !("text" in display)) throw new Error("missing display");
-      expect(display.text).toBe(block.text);
-      expect("startLine" in display && display.startLine).toBe(1);
-      expect("lineNumbers" in display).toBe(false);
+      expect(out!.content).toEqual([{ type: "text", text }]);
+      expect(out!.details!.displayContent).toEqual({ text, startLine: 1 });
     }
   });
 
@@ -103,13 +103,10 @@ describe("tool output line limit", () => {
     expect(out!.details!.displayContent).toEqual({ text, startLine: 1 });
   });
 
-  test("sampled raw source lines keep numeric pipe content", async () => {
+  test("raw source lines keep numeric pipe content", async () => {
     const text = Array.from({ length: 40 }, (_, i) => `${i + 1}|payload`).join("\n");
     const out = await limitResult({ toolName: "read", input: { path: "/x:220-259:raw" }, content: [{ type: "text", text }] }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
-    const block = out!.content[0];
-    if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
-    expect(block.text.split("\n")[0]).toBe("220| 1|payload");
-    expect(block.text.split("\n").at(-2)).toBe("259| 40|payload");
+    expect(out).toBeUndefined();
   });
 
   test("read stride notice is short; coordinate guidance lives in the session note", async () => {

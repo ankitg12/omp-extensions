@@ -66,6 +66,8 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     const details = matchingReadDisplay(event, text);
     return details ? { content: event.content, details } : undefined;
   };
+  const readPath = event.input?.path ?? event.input?.file_path;
+  if (event.toolName === "read" && typeof readPath === "string" && /(?:^|:)raw(?::|$)/.test(readPath)) return originalDisplay();
   const allLines = text.split(/\r?\n/);
   if (allLines.length <= limits.maxLines && text.length <= limits.maxPreviewChars) return originalDisplay();
   const candidate = event.toolName === "read" ? allLines.at(-1)?.match(/^\[Showing lines .+ of (\d+); (\d+) middle lines \([^\]]+\) elided\..*Read artifact:\/\/([^\s\]]+) for full output\]$/) : null;
