@@ -27,6 +27,8 @@ Configure `$XDG_CONFIG_HOME/omp/tool-output-lines.json`, or `~/.config/omp/tool-
 
 `before` and `after` (default 0, like `grep -B` and `-A`) add context lines around each sample point. The total still stays within `maxLines`: the extension uses fewer sample points when context lines take space, and it drops the context if two points with context would not fit.
 
+Stride mode follows the idea of [VenetianBlinds.js](https://github.com/firasd/vblinds), which samples a text file at evenly spaced character positions. This extension samples whole lines, keeps their original line numbers, and holds the result to `maxLines`. For code, [Aider's repository map](https://aider.chat/docs/repomap.html) is a different approach that shows symbols within a token budget.
+
 Change the limit for the current session with `/tool-lines`: `off` stops truncation, `<N>` sets the line limit (minimum 2), `head` or `stride` sets the mode, `before=N`, `after=N`, or `context=N` (both) sets the context lines (tokens combine, for example `/tool-lines stride context=2 40`), `on` or `reset` returns to the config file limits, and no argument shows the state. The override lasts until the session ends and does not change the config file.
 
 Global limits are required; per-tool overrides are optional and inherit any omitted field. Tool names are exact. The minimum line limit is 2 and the minimum character limit is 1. Invalid configuration falls back to the defaults. Changes apply to the next tool result.
