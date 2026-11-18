@@ -188,7 +188,7 @@ describe("tool output line limit", () => {
   test("caps read and grep display metadata as well as model output", async () => {
     const text = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n");
     const ctx = { sessionManager: { saveArtifact: async () => "7" } };
-    const limits = { maxLines: 10, maxPreviewChars: 2000 };
+    const limits = { maxLines: 10, maxPreviewChars: 2000, mode: "head" as const, before: 0, after: 0 };
     const read = await limitResult({ toolName: "read", input: { path: "artifact://4" }, content: [{ type: "text", text }], details: { resolvedPath: "/long/path", displayContent: { text, startLine: 1, lineNumbers: Array.from({ length: 40 }, (_, i) => i + 1) } } }, ctx, limits);
     const display = read!.details!.displayContent as { text: string; lineNumbers: number[] };
     expect(display.text.split("\n")).toHaveLength(10);
