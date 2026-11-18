@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { outlineFile } from "./outline.ts";
 
-const modes = ["head", "stride"];
-export type Mode = "head" | "stride";
+const modes = ["head", "stride", "outline"];
+export type Mode = "head" | "stride" | "outline";
 export type Limits = { maxLines: number; maxPreviewChars: number; mode: Mode; before: number; after: number };
 const defaults: Limits = { maxLines: 10, maxPreviewChars: 2000, mode: "head", before: 0, after: 0 };
 const xdgConfig = process.env.XDG_CONFIG_HOME;
@@ -70,12 +71,17 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   }
   if (id === undefined) return;
 
-  const sampled = limits.mode === "stride" && lines.length > 2 ? sample(lines, limits) : undefined;
-  const preview = sampled ? sampled.text : lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
-  const notice = sampled
-    ? event.toolName === "read"
-      ? `[sampled ${sampled.picked.length} of ${lines.length} result lines, not contiguous · saved result: artifact://${id} (artifact line numbers are relative to saved output) · source lines: read <original-path>:START-END]`
-      : `[sampled ${sampled.picked.length} of ${lines.length} lines at evenly spaced points, not contiguous · full output: artifact://${id} · zoom in with read artifact://${id}:START-END]`
+  const sourcePath = event.input?.path ?? event.input?.file_path;
+  const rangedRead = typeof sourcePath === "string" && /:\d+/.test(sourcePath.replace(/^[A-Za-z]:/, ""));
+  const outline = limits.mode === "outline" && event.toolName === "read" && typeof sourcePath === "string" && !sourcePath.includes("://") && !rangedRead
+    ? await outlineFile(sourcePath.replace(/:raw$/, ""), limits.maxLines - 1)
+    : undefined;
+  const sampled = !outline && limits.mode !== "head" && lines.length > 2 ? sample(lines, limits) : undefined;
+  const preview = outline ? outline.join("\n").slice(0, limits.maxPreviewChars) : sampled ? sampled.text : lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
+  const notice = outline
+    ? `[outline: ${outline.length} symbols of a ${lines.length}-line result · START-END are source lines: read ${sourcePath}:START-END · saved result: artifact://${id}]`
+    : sampled
+    ? `[sampled ${sampled.picked.length}/${lines.length} lines · artifact://${id}]`
     : `[${lines.length} lines · full output: artifact://${id}]`;
   const nonText = event.content.filter(block => block.type !== "text");
   const details = event.details ? { ...event.details } : undefined;
@@ -84,7 +90,9 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     if (display && typeof display === "object" && "text" in display && typeof display.text === "string") {
       const all = display.text.split(/\r?\n/);
       const allNumbers = "lineNumbers" in display && Array.isArray(display.lineNumbers) ? display.lineNumbers : undefined;
-      if (sampled) {
+      if (outline) {
+        details.displayContent = { ...display, text: `${preview}\n${notice}`, lineNumbers: [...preview.split("\n").map(() => null), null] };
+      } else if (sampled) {
         const visible = preview.split("\n");
         const lineNumbers = visible.map(line => {
           const match = line.match(/^\s*(\d+)(?:-\d+)?\|/);
@@ -153,19 +161,20 @@ export function parseCommand(args: string, current: Override): { next: Override;
   for (const token of arg.split(/\s+/)) {
     const [key, value = ""] = token.split("=");
     const count = Number(value);
-    if (token === "stride" || token === "head") next.mode = token;
+    if (token === "stride" || token === "head" || token === "outline") next.mode = token;
     else if (/^\d+$/.test(token) && Number(token) >= 2) next.maxLines = Number(token);
     else if (["before", "after", "context"].includes(key) && /^\d+$/.test(value)) {
       if (key !== "after") next.before = count;
       if (key !== "before") next.after = count;
-    } else return { next: current, message: "usage: /tool-lines [status|off|on|reset|head|stride|<lines >= 2>|before=N|after=N|context=N]" };
+    } else return { next: current, message: "usage: /tool-lines [|status|off|on|reset|head|stride|outline|<lines >= 2>|before=N|after=N|context=N]" };
   }
   return { next, message: `tool-output-lines: ${describe(next)} for this session` };
 }
 
 const strideNote = [
   "Tool results longer than the limit may arrive as an evenly spaced sample of lines (each sample point may carry a few context lines), not a contiguous block.",
-  "Each sampled line starts with its original line number; the first and last lines are kept; the result ends with a [sampled K of N ...] notice.",
+  "Each sampled line starts with its original line number; the first and last lines are kept; the result ends with a [sampled K/N lines · artifact://ID] notice.",
+  "A result starting with [outline: ...] is a symbol index of a code file: each START-END is a source line range, so `read <original-path>:START-END` returns that symbol.",
   "Do not assume skipped lines are empty or irrelevant. For read results, use original source line numbers with the original path; artifact line numbers are offsets in the saved result and may not match source lines. For other results, zoom in with `read artifact://ID:START-END`.",
 ].join(" ");
 
@@ -188,17 +197,18 @@ export default function toolOutputLines(pi: Pi) {
   });
   pi.on("before_agent_start", async event => {
     if (override.off || typeof event.systemPrompt !== "string") return;
-    let stride = override.mode === "stride";
+    const sampling = (mode: unknown) => mode === "stride" || mode === "outline";
+    let stride = sampling(override.mode);
     if (!stride && override.mode === undefined) {
       try {
         const config = JSON.parse(await readFile(configPath, "utf8"));
-        stride = config.mode === "stride" || Object.values(config.tools ?? {}).some(tool => !!tool && typeof tool === "object" && "mode" in tool && tool.mode === "stride");
+        stride = sampling(config.mode) || Object.values(config.tools ?? {}).some(tool => !!tool && typeof tool === "object" && "mode" in tool && sampling(tool.mode));
       } catch {}
     }
     if (stride) return { systemPrompt: `${event.systemPrompt}\n\n${strideNote}` };
   });
   pi.registerCommand?.("tool-lines", {
-    description: "Session tool-output limit: status | off | on | head | stride | <lines>",
+    description: "Session tool-output limit: status | off | on | head | stride | outline | <lines>",
     handler: async (args, ctx) => {
       const { next, message } = parseCommand(args, override);
       override = next;

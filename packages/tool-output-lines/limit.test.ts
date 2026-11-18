@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import toolOutputLines, { limitResult, loadLimits, parseCommand, type Context, type Result } from "./limit.ts";
+import { formatOutline } from "./outline.ts";
 
 const result = (text: string) => ({ toolName: "bash", content: [{ type: "text", text }] });
 
@@ -24,8 +25,8 @@ describe("tool output line limit", () => {
     expect(text).toHaveLength(10);
     expect(text[0]).toBe("1|row 1");
     expect(text[8]).toBe("100|row 100");
-    expect(text[9]).toContain("sampled 9 of 100");
-    expect(text[9]).toContain("artifact://7:START-END");
+    expect(text[9]).toContain("sampled 9/100");
+    expect(text[9]).toContain("artifact://7");
   });
 
   test("stride mode numbers lines that arrive without numbers", async () => {
@@ -72,13 +73,11 @@ describe("tool output line limit", () => {
     expect(saved).toBe(text);
   });
 
-  test("read stride notice distinguishes source line numbers from artifact offsets", async () => {
+  test("read stride notice is short; coordinate guidance lives in the session note", async () => {
     const text = Array.from({ length: 40 }, (_, i) => `${i + 101}|row ${i + 101}`).join("\n");
     const out = await limitResult({ toolName: "read", input: { path: "/x:101-140" }, content: [{ type: "text", text }], details: {} }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
     const notice = out!.content[0].text!.split("\n").at(-1)!;
-    expect(notice).toContain("read <original-path>:START-END");
-    expect(notice).toContain("artifact line numbers are relative to saved output");
-    expect(notice).not.toContain("full output");
+    expect(notice).toBe("[sampled 9/40 lines · artifact://5]");
   });
 
   test("stride read preview preserves structural summary ranges and source positions", async () => {
@@ -110,6 +109,40 @@ describe("tool output line limit", () => {
     const visible = out!.content[0].text!.split("\n");
     const display = out!.details!.displayContent as { text: string; lineNumbers: number[] };
     expect(display.text.split("\n")).toEqual(visible.map(line => line.replace(/^\s*\d+\|/, "")));
+  });
+
+  test("formatOutline gives 1-based source ranges and trims to the budget", () => {
+    const json = JSON.stringify([{ items: [
+      { signature: "export type A = 1;", range: { start: { line: 5 }, end: { line: 5 } } },
+      { signature: "export function f(a: string) {\n  body", range: { start: { line: 10 }, end: { line: 20 } } },
+      { signature: "export const g = 2;", range: { start: { line: 30 }, end: { line: 30 } } },
+    ] }]);
+    expect(formatOutline(json, 10)).toEqual(["6: export type A = 1;", "11-21: export function f(a: string) {", "31: export const g = 2;"]);
+    expect(formatOutline(json, 2)).toEqual(["6: export type A = 1;", "… 2 more symbols"]);
+    expect(formatOutline("not json", 5)).toBeUndefined();
+    expect(formatOutline("[]", 5)).toBeUndefined();
+  });
+
+  test("outline mode replaces a long read of code with a symbol index; ranged reads fall back to stride", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "outline-"));
+    const file = join(dir, "sample.ts");
+    await writeFile(file, Array.from({ length: 60 }, (_, i) => (i % 10 === 0 ? `export function f${i}() {` : i % 10 === 9 ? "}" : "  const x = 1;")).join("\n"));
+    const numbered = Array.from({ length: 60 }, (_, i) => `${i + 1}|row ${i + 1}`).join("\n");
+    const ctx = { sessionManager: { saveArtifact: async () => "9" } };
+    const limits = { maxLines: 10, maxPreviewChars: 2000, mode: "outline" as const, before: 0, after: 0 };
+    const out = await limitResult({ toolName: "read", input: { path: file }, content: [{ type: "text", text: numbered }], details: {} }, ctx, limits);
+    const text = (out?.content[0] as { text: string }).text;
+    expect(text).toContain("1-10: export function f0() {");
+    expect(text).toContain("[outline: 6 symbols of a 60-line result");
+    const ranged = await limitResult({ toolName: "read", input: { path: `${file}:5-40` }, content: [{ type: "text", text: numbered }], details: {} }, ctx, limits);
+    expect((ranged?.content[0] as { text: string }).text).toContain("sampled");
+    const missing = await limitResult({ toolName: "read", input: { path: join(dir, "nope.ts") }, content: [{ type: "text", text: numbered }], details: {} }, ctx, limits);
+    expect((missing?.content[0] as { text: string }).text).toContain("sampled");
+    await rm(dir, { recursive: true });
+  });
+
+  test("slash command accepts the outline mode", () => {
+    expect(parseCommand("outline", { off: false }).next).toEqual({ off: false, mode: "outline" });
   });
 
   test("slash command accepts context tokens together with mode", () => {
