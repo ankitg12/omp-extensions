@@ -89,6 +89,7 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
       // Show the exact text the model receives, line-number prefixes included, so a regression is visible.
       const { lineNumbers: _gutter, ...rest } = display as Record<string, unknown>;
       details.displayContent = { ...rest, text: `${preview}\n${notice}` };
+      details.contentType = "text/plain"; // Markdown rendering would join the `N|` lines into paragraphs.
     }
     const path = event.input?.path ?? event.input?.file_path;
     if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;

@@ -89,6 +89,7 @@ describe("tool output line limit", () => {
       expect(display.text).toBe((out!.content[0] as { text: string }).text);
       expect(display.text.split("\n")[0]).toBe("1|row 1");
       expect(display.lineNumbers).toBeUndefined();
+      expect(out!.details!.contentType).toBe("text/plain");
     }
   });
 
