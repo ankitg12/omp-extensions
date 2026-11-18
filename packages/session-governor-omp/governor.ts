@@ -59,6 +59,12 @@ export interface RuleConfig {
 	repeat?: boolean;
 }
 
+export interface SuggestionConfig {
+	name: string;
+	when: string;
+	message: string;
+}
+
 export interface ShiftConfig {
 	enabled: boolean;
 	/** Agent kinds the engine acts in (`ctx.agent.kind`). Default: main only. */
@@ -70,6 +76,7 @@ export interface ShiftConfig {
 	debug: boolean;
 	/** Exact provider/model selectors mapped to trusted instruction files. */
 	modelInstructions: Record<string, string>;
+	suggestions: SuggestionConfig[];
 	/** Model selector or OMP role to use after a committed compaction. */
 	afterCompaction?: string;
 	/** Latch an epoch cut after the active model changes. */
@@ -102,6 +109,7 @@ export interface RuleVars {
 	shakeable: bigint;
 	blocked_streak: bigint;
 	attempts_on_goal: bigint;
+	quiet_tool_calls: bigint;
 }
 
 export interface ShiftState {
@@ -152,6 +160,7 @@ export const VARIABLES: ReadonlyArray<[keyof RuleVars, string, string]> = [
 	["shakeable", "int", "Tokens OMP's aggressive /shake would free now (OMP's own region finder + tokenizer; same number as the shake-meter footer)"],
 	["blocked_streak", "int", "Agent `progress` reports of `blocked` in a row (reset by progress/done)"],
 	["attempts_on_goal", "int", "Agent `progress` reports since the last `done`, any status"],
+	["quiet_tool_calls", "int", "Tool calls since the last non-empty assistant text in this run or a suggestion"],
 ];
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".omp", "governor.yml");
@@ -186,6 +195,17 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 		const expanded = file === "~" ? homedir() : file.startsWith("~/") ? join(homedir(), file.slice(2)) : file;
 		modelInstructions[model] = isAbsolute(expanded) ? expanded : resolve(dirname(path), expanded);
 	}
+	if (obj.suggestions !== undefined && !Array.isArray(obj.suggestions)) throw new Error(`${path}: suggestions must be a list`);
+	const suggestions: SuggestionConfig[] = [];
+	const suggestionNames = new Set<string>();
+	for (const item of (obj.suggestions ?? []) as unknown[]) {
+		if (!isRecord(item) || typeof item.name !== "string" || !item.name.trim() || typeof item.when !== "string" || !item.when.trim() || typeof item.message !== "string" || !item.message.trim()) {
+			throw new Error(`${path}: each suggestion needs non-empty name, when, and message strings`);
+		}
+		if (suggestionNames.has(item.name)) throw new Error(`${path}: duplicate suggestion name '${item.name}'`);
+		suggestionNames.add(item.name);
+		suggestions.push({ name: item.name, when: item.when, message: item.message });
+	}
 	const prune = (obj.prune && typeof obj.prune === "object" ? obj.prune : {}) as Record<string, unknown>;
 	if (prune.foreign !== undefined) {
 		throw new Error(`${path}: prune.foreign moved to model-switch-prune-omp (~/.omp/agent/model-switch-prune.json "mode"); remove it here`);
@@ -213,6 +233,7 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 		epochShape,
 		debug: obj.debug === true || prune.debug === true,
 		modelInstructions,
+		suggestions,
 	};
 }
 
@@ -415,6 +436,8 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	let lastPruneKey = "";
 	/** Most recent wire messages as the `context` hook received them, before this extension's pruning. */
 	let lastWire: readonly AgentMessage[] = [];
+	let quietToolCalls = 0;
+	let runActive = false;
 	let compactionRunActive = false;
 	let pendingCompaction: { id: string; method?: string } | undefined;
 
@@ -434,9 +457,16 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		loadError = undefined;
 		try {
 			config = loadConfig(configPath);
-			if (config) rules = compileRules(env, config.rules);
+			if (config) {
+				rules = compileRules(env, config.rules);
+				for (const suggestion of config.suggestions) {
+					const checked = env.check(suggestion.when) as { valid: boolean; type?: string; error?: Error };
+					if (!checked.valid || checked.type !== "bool") throw new Error(`suggestion '${suggestion.name}': ${checked.error?.message.split("\n")[0] ?? "condition must be boolean"}`);
+				}
+			}
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : String(err);
+			config = undefined;
 			rules = [];
 		}
 	}
@@ -465,6 +495,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 			shakeable: BigInt(previewShake(branch, model).tokens),
 			blocked_streak: BigInt(progress.blocked_streak),
 			attempts_on_goal: BigInt(progress.attempts_on_goal),
+			quiet_tool_calls: BigInt(quietToolCalls),
 			turns_since_prune: BigInt(cutTs === undefined ? prompts.length : prompts.filter(t => t > cutTs).length),
 			cost: branchCost(branch),
 			tokens: BigInt(Math.round(usage?.tokens ?? 0)),
@@ -502,10 +533,39 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 
 	pi.on("session_switch", (_e, ctx) => {
 		lastCtx = ctx;
+		runActive = false;
+		quietToolCalls = 0;
 		afk = false;
 		onSession("switch", ctx as unknown as SessionCtx);
 		lastObservedModel = modelKey(ctx.model);
 		lastWire = [];
+	});
+
+	pi.on("agent_start", (_event, ctx) => {
+		runActive = config?.enabled === true && config.agents.includes(ctx.agent?.kind ?? "main");
+		quietToolCalls = 0;
+	});
+
+	pi.on("assistant_message", (event, ctx) => {
+		if (!runActive || !config?.agents.includes(ctx.agent?.kind ?? "main")) return;
+		if (event.message.content.some(block => block.type === "text" && block.text.trim())) quietToolCalls = 0;
+	});
+
+	pi.on("tool_result", (_event, ctx) => {
+		if (!runActive || !config?.enabled || !config.agents.includes(ctx.agent?.kind ?? "main")) return;
+		quietToolCalls++;
+		if (!config.suggestions.length) return;
+		const vars = collectVars(ctx);
+		for (const suggestion of config.suggestions) {
+			try {
+				if (env.evaluate(suggestion.when, vars as unknown as Record<string, unknown>) !== true) continue;
+				quietToolCalls = 0;
+				log("suggestion", { name: suggestion.name });
+				return { additionalContext: suggestion.message };
+			} catch (err) {
+				log("suggestion-error", { name: suggestion.name, message: String(err) });
+			}
+		}
 	});
 
 	// Select on every user prompt so manual and governor model switches use the new file.
@@ -582,6 +642,8 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async (_e, ctx) => {
+		runActive = false;
+		quietToolCalls = 0;
 		compactionRunActive = false;
 		lastCtx = ctx;
 		const compacted = pendingCompaction;
@@ -775,9 +837,9 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 			const vars = collectVars(ctx as never);
 			const lines = [
 				`governor: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? `armed; model rules paused (manual /model)${state.effortPaused ? ", effort rules paused (manual effort)" : ""}` : state.effortPaused ? "armed; effort rules paused (manual effort)" : "armed"}`,
-				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune} prunable=${vars.prunable} blocked_streak=${vars.blocked_streak} attempts_on_goal=${vars.attempts_on_goal}`,
 				...(compactionTarget(ctx) ? [`after compaction: ${compactionTarget(ctx)}${pendingCompaction ? " (pending until run end)" : ""}`] : []),
 				`prune on model switch: ${config?.pruneOnModelSwitch ? "on" : "off"}`,
+				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune} prunable=${vars.prunable} blocked_streak=${vars.blocked_streak} attempts_on_goal=${vars.attempts_on_goal} quiet_tool_calls=${vars.quiet_tool_calls}`,
 				...(pi.getAllTools().some(t => t.name === "progress") ? [] : ["WARNING: no `progress` tool (load agent-progress-tool-omp); blocked_streak/attempts_on_goal stay 0, stuck rules cannot fire"]),
 				`prune: cut=${state.cut ? `${new Date(state.cut.cutTs).toISOString()} (rule ${state.cut.rule})` : "none"}`,
 				lastPrune

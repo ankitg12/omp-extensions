@@ -74,6 +74,58 @@ describe("model-specific instructions", () => {
 	});
 });
 
+describe("run suggestions", () => {
+	test("validates suggestion configuration", () => {
+		const dir = mkdtempSync(join(tmpdir(), "gov-suggestions-config-"));
+		try {
+			const path = join(dir, "governor.yml");
+			writeFileSync(path, 'rules: []\nsuggestions:\n  - name: quiet\n    when: quiet_tool_calls >= 10\n    message: update please\n');
+			expect(loadConfig(path)?.suggestions).toEqual([{ name: "quiet", when: "quiet_tool_calls >= 10", message: "update please" }]);
+			writeFileSync(path, 'rules: []\nsuggestions:\n  - name: quiet\n    when: "true"\n    message: ""\n');
+			expect(() => loadConfig(path)).toThrow(/each suggestion needs/);
+			writeFileSync(path, 'rules: []\nsuggestions:\n  - { name: quiet, when: "true", message: one }\n  - { name: quiet, when: "true", message: two }\n');
+			expect(() => loadConfig(path)).toThrow(/duplicate suggestion/);
+		} finally { rmSync(dir, { recursive: true, force: true }); }
+	});
+
+	test("injects once per quiet threshold, resets on text and respects run and agent scope", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "gov-suggestions-hook-"));
+		const oldConfig = process.env.OMP_GOVERNOR_CONFIG;
+		const oldLog = process.env.OMP_GOVERNOR_LOG;
+		try {
+			const config = join(dir, "governor.yml");
+			writeFileSync(config, 'rules: []\nagents: [main]\nsuggestions:\n  - name: quiet\n    when: quiet_tool_calls >= 3 && model == "provider/one"\n    message: update please\n');
+			process.env.OMP_GOVERNOR_CONFIG = config;
+			process.env.OMP_GOVERNOR_LOG = join(dir, "log.jsonl");
+			const handlers: Record<string, Function> = {};
+			const pi = { on: (name: string, fn: Function) => { handlers[name] = fn; }, events: { on: () => {} }, registerCommand: () => {}, appendEntry: () => {} };
+			governor(pi as never);
+			const ctx = { agent: { kind: "main" }, model: { provider: "provider", id: "one" }, ui: { notify: () => {} }, sessionManager: { getEntries: () => [], getBranch: () => [] }, getContextUsage: () => undefined };
+			await handlers.session_start({}, ctx);
+			expect(handlers.tool_result({}, ctx)).toBeUndefined();
+			handlers.agent_start({}, ctx);
+			expect(handlers.tool_result({}, ctx)).toBeUndefined();
+			expect(handlers.tool_result({}, ctx)).toBeUndefined();
+			handlers.assistant_message({ message: { content: [{ type: "thinking", thinking: "private" }] } }, ctx);
+			expect(handlers.tool_result({}, ctx)).toEqual({ additionalContext: "update please" });
+			expect(handlers.tool_result({}, ctx)).toBeUndefined();
+			handlers.assistant_message({ message: { content: [{ type: "text", text: "working" }] } }, ctx);
+			expect(handlers.tool_result({}, ctx)).toBeUndefined();
+			expect(handlers.tool_result({}, ctx)).toBeUndefined();
+			expect(handlers.tool_result({}, ctx)).toEqual({ additionalContext: "update please" });
+			await handlers.agent_end({}, ctx);
+			expect(handlers.tool_result({}, ctx)).toBeUndefined();
+			ctx.agent.kind = "sub";
+			handlers.agent_start({}, ctx);
+			for (let i = 0; i < 4; i++) expect(handlers.tool_result({}, ctx)).toBeUndefined();
+		} finally {
+			if (oldConfig === undefined) delete process.env.OMP_GOVERNOR_CONFIG; else process.env.OMP_GOVERNOR_CONFIG = oldConfig;
+			if (oldLog === undefined) delete process.env.OMP_GOVERNOR_LOG; else process.env.OMP_GOVERNOR_LOG = oldLog;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 async function withCompactionGovernor(config: string, check: (fixture: {
 	compact: (method?: string) => Promise<void>;
 	start: () => void;
@@ -205,6 +257,7 @@ const vars = (over: Partial<RuleVars> = {}): RuleVars => ({
 	shakeable: 0n,
 	blocked_streak: 0n,
 	attempts_on_goal: 0n,
+	quiet_tool_calls: 0n,
 	cost: 0.5,
 	tokens: 20_000n,
 	context_window: 200_000n,

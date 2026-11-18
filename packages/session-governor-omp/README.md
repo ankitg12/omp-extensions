@@ -61,6 +61,25 @@ is disabled when the governor is disabled. Use `/governor reload` after editing 
 content changes are picked up on the next prompt. Model switches during tool-only continuations do
 not update the instructions until the next user prompt.
 
+## Suggestions during a run
+
+Suggestions use CEL conditions and trusted inline messages in `~/.omp/governor.yml`:
+
+```yaml
+suggestions:
+  - name: quiet-progress
+    when: 'quiet_tool_calls >= 10'
+    message: "The user hasn't heard from you in a while: say briefly what you are doing, then continue."
+```
+
+The governor counts completed tool calls during an active run. Non-empty assistant text resets the count;
+thinking blocks do not, because their visibility depends on the client. A suggestion also resets it. The
+first matching suggestion is delivered as passive context after the tool batch, without interrupting it
+or touching the user's editor. Rules can use the governor's CEL variables, including `model` and `agent`.
+The normal `enabled` and `agents` settings apply. Conditions are checked on each tool result, not on a
+timer; an individual long-running tool cannot be interrupted by this feature. Use `/governor reload`
+after editing the configuration. The existing timed `agent-suggester-omp` remains separate.
+
 ## Config
 
 The rules file is `~/.omp/governor.yml` (fallback env: `OMP_GOVERNOR_CONFIG`). If missing, the governor is inert.
