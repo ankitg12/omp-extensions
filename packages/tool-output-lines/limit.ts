@@ -66,8 +66,6 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     const details = matchingReadDisplay(event, text);
     return details ? { content: event.content, details } : undefined;
   };
-  const readPath = event.input?.path ?? event.input?.file_path;
-  if (event.toolName === "read" && typeof readPath === "string" && /(?:^|:)raw(?::|$)/.test(readPath)) return originalDisplay();
   const allLines = text.split(/\r?\n/);
   if (allLines.length <= limits.maxLines && text.length <= limits.maxPreviewChars) return originalDisplay();
   const candidate = event.toolName === "read" ? allLines.at(-1)?.match(/^\[Showing lines .+ of (\d+); (\d+) middle lines \([^\]]+\) elided\..*Read artifact:\/\/([^\s\]]+) for full output\]$/) : null;
@@ -186,7 +184,7 @@ export function parseCommand(args: string, current: Override): { next: Override;
 }
 
 const exactReadNote = (maxLines: number) =>
-  `Tool results longer than ${maxLines} lines may be shortened. Explicit raw reads bypass this extension and can exceed the limit. To see exact source lines, request a normal read range of at most ${maxLines} lines: \`read <path>:START-END\`, or \`read artifact://ID:START-END\` for a saved result.`;
+  `Tool results longer than ${maxLines} lines may be shortened. To see exact source lines, request a read range of at most ${maxLines} lines: \`read <path>:START-END\`, or \`read artifact://ID:START-END\` for a saved result.`;
 
 const strideNote = [
   "Tool results longer than the limit may arrive as an evenly spaced sample of lines (each sample point may carry a few context lines), not a contiguous block.",
