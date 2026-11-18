@@ -171,6 +171,9 @@ export function parseCommand(args: string, current: Override): { next: Override;
   return { next, message: `tool-output-lines: ${describe(next)} for this session` };
 }
 
+const exactReadNote = (maxLines: number) =>
+  `Tool results longer than ${maxLines} lines are shortened. A result within ${maxLines} lines arrives in full, so to see exact lines request a range of at most ${maxLines} lines: \`read <path>:START-END\`, or \`read artifact://ID:START-END\` for a saved result. Do not work around the limit with bash awk, sed, cat or head.`;
+
 const strideNote = [
   "Tool results longer than the limit may arrive as an evenly spaced sample of lines (each sample point may carry a few context lines), not a contiguous block.",
   "Each sampled line starts with its original line number; the first and last lines are kept; the result ends with a [sampled K/N lines · artifact://ID] notice.",
@@ -205,7 +208,8 @@ export default function toolOutputLines(pi: Pi) {
         stride = sampling(config.mode) || Object.values(config.tools ?? {}).some(tool => !!tool && typeof tool === "object" && "mode" in tool && sampling(tool.mode));
       } catch {}
     }
-    if (stride) return { systemPrompt: `${event.systemPrompt}\n\n${strideNote}` };
+    const { maxLines } = await loadLimits(configPath, "read");
+    return { systemPrompt: `${event.systemPrompt}\n\n${exactReadNote(maxLines)}${stride ? `\n\n${strideNote}` : ""}` };
   });
   pi.registerCommand?.("tool-lines", {
     description: "Session tool-output limit: status | off | on | head | stride | outline | <lines>",
