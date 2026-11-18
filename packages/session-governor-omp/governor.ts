@@ -440,6 +440,8 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	let runActive = false;
 	let compactionRunActive = false;
 	let pendingCompaction: { id: string; method?: string } | undefined;
+	/** A mid-run turn boundary already applied the compaction model; model rules skip this run's agent_end. */
+	let compactionSwitchedMidRun = false;
 
 	function log(event: string, details: Record<string, unknown> = {}): void {
 		const path = process.env.OMP_GOVERNOR_LOG ?? config?.logPath ?? DEFAULT_LOG_PATH;
@@ -512,6 +514,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	const onSession = (reason: string, ctx: SessionCtx) => {
 		reload();
 		pendingCompaction = undefined;
+		compactionSwitchedMidRun = false;
 		compactionRunActive = false;
 		const entries = ctx.sessionManager?.getEntries?.() ?? [];
 		state = restoreState(entries);
@@ -636,9 +639,16 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	});
 
 	// Mid-run: only prune-only rules may fire here; model and effort changes wait for agent_end.
+	// The one exception is a deferred afterCompaction switch: a turn boundary is before the next
+	// provider request, so it applies there instead of after a long tool loop ends.
 	pi.on("turn_end", async (_e, ctx) => {
 		lastCtx = ctx;
-		await serialize("turn_end", () => evaluate(ctx, "turn_end", true));
+		await serialize("turn_end", async () => {
+			const compacted = pendingCompaction;
+			pendingCompaction = undefined;
+			if (compacted && (await switchAfterCompaction(ctx, compacted))) compactionSwitchedMidRun = true;
+			await evaluate(ctx, "turn_end", true);
+		});
 	});
 
 	pi.on("agent_end", async (_e, ctx) => {
@@ -649,7 +659,8 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		const compacted = pendingCompaction;
 		pendingCompaction = undefined;
 		await serialize("agent_end", async () => {
-			const selected = compacted ? await switchAfterCompaction(ctx, compacted) : false;
+			const selected = (compacted ? await switchAfterCompaction(ctx, compacted) : false) || compactionSwitchedMidRun;
+			compactionSwitchedMidRun = false;
 			await evaluate(ctx, "agent_end", selected);
 		});
 	});

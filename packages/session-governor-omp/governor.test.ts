@@ -130,6 +130,7 @@ async function withCompactionGovernor(config: string, check: (fixture: {
 	compact: (method?: string) => Promise<void>;
 	start: () => void;
 	end: () => Promise<void>;
+	turn: () => Promise<void>;
 	ctx: { agent: { kind: string } };
 	current: () => string;
 	lookups: string[];
@@ -186,6 +187,7 @@ async function withCompactionGovernor(config: string, check: (fixture: {
 			compact: async method => { await handlers.session_compact[0]({ compactionEntry: { id: `c${++sequence}`, method } }, ctx); },
 			start: () => { for (const handler of handlers.agent_start) handler({}, ctx); },
 			end: () => handlers.agent_end[0]({}, ctx),
+			turn: () => handlers.turn_end[0]({}, ctx),
 			ctx, current: () => model.id, lookups, switches, notices, entries,
 		});
 	} finally {
@@ -208,13 +210,15 @@ describe("model after compaction", () => {
 		});
 	});
 
-	test("defers active compaction until settle and wins over CEL model rules at that boundary", async () => {
+	test("defers active compaction to the next turn boundary and wins over CEL model rules there", async () => {
 		const config = "afterCompaction: provider/chosen\nrules:\n  - when: 'true'\n    use: provider/rule\n";
-		await withCompactionGovernor(config, async ({ compact, start, end, current, switches, entries }) => {
+		await withCompactionGovernor(config, async ({ compact, start, turn, end, current, switches, entries }) => {
 			start();
 			await compact("soft");
 			await compact("handoff");
 			expect(current()).toBe("original");
+			await turn();
+			expect(switches).toEqual(["chosen"]);
 			await end();
 			expect(switches).toEqual(["chosen"]);
 			expect(entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ method: "handoff" }) }));

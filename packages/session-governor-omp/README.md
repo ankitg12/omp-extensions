@@ -32,8 +32,10 @@ afterCompaction: '@default'
 This changes the current session model, not OMP's default or the model that performs compaction.
 It applies to any method that saves a compaction entry, including manual `/compact`, soft, remote,
 snapcompact, and handoff. Failed or cancelled compactions and prune-only maintenance do not trigger it.
-If a run is active, the governor waits for `agent_end` rather than switch during a tool loop. The
-compaction selection takes precedence over CEL model and effort rules at that boundary. The setting
+If a run is active, the governor waits for the next `turn_end` (the end of the current tool batch,
+before the next provider request) rather than switch inside a request. A compaction in a long tool
+loop therefore switches within one turn, not after the run ends. The compaction selection takes
+precedence over CEL model and effort rules for that run's `agent_end`. The setting
 is independent of the manual-model pause for CEL rules; it still obeys `enabled` and `agents`.
 If the target is unavailable, the governor warns and leaves the model unchanged.
 
