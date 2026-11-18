@@ -69,6 +69,16 @@ describe("tool output line limit", () => {
     expect(display.lineNumbers.slice(0, 9)).toEqual([1, 13, 26, 38, 51, 63, 75, 88, 100]);
   });
 
+  test("stride preview mirrors sampled read content when a footer is absent from displayContent", async () => {
+    const rows = Array.from({ length: 40 }, (_, i) => `${i + 1}|row ${i + 1}`);
+    const text = `${rows.join("\n")}\n\n[Some lines truncated]`;
+    const plain = Array.from({ length: 40 }, (_, i) => `row ${i + 1}`).join("\n");
+    const out = await limitResult({ toolName: "read", content: [{ type: "text", text }], details: { displayContent: { text: plain, startLine: 1, lineNumbers: Array.from({ length: 40 }, (_, i) => i + 1) } } }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 1, after: 1 });
+    const visible = out!.content[0].text!.split("\n");
+    const display = out!.details!.displayContent as { text: string; lineNumbers: number[] };
+    expect(display.text.split("\n")).toEqual(visible.map(line => line.replace(/^\s*\d+\|/, "")));
+  });
+
   test("slash command accepts context tokens together with mode", () => {
     expect(parseCommand("stride context=2", { off: false }).next).toEqual({ off: false, mode: "stride", before: 2, after: 2 });
     expect(parseCommand("before=1 after=3", { off: false }).next).toEqual({ off: false, before: 1, after: 3 });

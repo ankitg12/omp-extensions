@@ -80,10 +80,15 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     if (display && typeof display === "object" && "text" in display && typeof display.text === "string") {
       const all = display.text.split(/\r?\n/);
       const allNumbers = "lineNumbers" in display && Array.isArray(display.lineNumbers) ? display.lineNumbers : undefined;
-      const picked = sampled && all.length === lines.length ? sampled.picked : all.slice(0, limits.maxLines - 1).map((_, i) => i);
-      const displayLines = picked.map(i => all[i] ?? "");
-      const lineNumbers = allNumbers ? picked.map(i => allNumbers[i] ?? i + 1) : undefined;
-      details.displayContent = { ...display, text: `${displayLines.join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`, ...(lineNumbers ? { lineNumbers: [...lineNumbers, (lineNumbers.at(-1) ?? 0) + 1] } : {}) };
+      if (sampled) {
+        const visible = preview.split("\n");
+        const lineNumbers = visible.map((line, i) => Number(line.match(/^\s*(\d+)\|/)?.[1] ?? allNumbers?.[sampled.picked[i]] ?? sampled.picked[i] + 1));
+        details.displayContent = { ...display, text: `${visible.map(line => line.replace(/^\s*\d+\|/, "")).join("\n")}\n${notice}`, lineNumbers: [...lineNumbers, (lineNumbers.at(-1) ?? 0) + 1] };
+      } else {
+        const displayLines = all.slice(0, limits.maxLines - 1);
+        const lineNumbers = allNumbers?.slice(0, displayLines.length);
+        details.displayContent = { ...display, text: `${displayLines.join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`, ...(lineNumbers ? { lineNumbers: [...lineNumbers, (lineNumbers.at(-1) ?? 0) + 1] } : {}) };
+      }
     }
     const path = event.input?.path ?? event.input?.file_path;
     if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;
