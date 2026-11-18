@@ -70,6 +70,8 @@ export interface ShiftConfig {
 	debug: boolean;
 	/** Exact provider/model selectors mapped to trusted instruction files. */
 	modelInstructions: Record<string, string>;
+	/** Model selector or OMP role to use after a committed compaction. */
+	afterCompaction?: string;
 }
 
 export interface CompiledRule {
@@ -164,9 +166,12 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 	if (!existsSync(path)) return undefined;
 	const text = readFileSync(path, "utf8");
 	const raw: unknown = path.endsWith(".json") ? JSON.parse(text) : Bun.YAML.parse(text);
-	if (!raw || typeof raw !== "object") throw new Error(`${path}: expected a mapping at top level`);
-	const obj = raw as Record<string, unknown>;
-	if (!Array.isArray(obj.rules)) throw new Error(`${path}: 'rules' must be a list`);
+	if (!isRecord(raw) || Array.isArray(raw)) throw new Error(`${path}: expected a mapping at top level`);
+	const obj = raw;
+	if (obj.rules !== undefined && !Array.isArray(obj.rules)) throw new Error(`${path}: 'rules' must be a list`);
+	if (obj.afterCompaction !== undefined && (typeof obj.afterCompaction !== "string" || !obj.afterCompaction.trim())) {
+		throw new Error(`${path}: 'afterCompaction' must be a non-empty model selector or role`);
+	}
 	if (obj.modelInstructions !== undefined && (!isRecord(obj.modelInstructions) || Object.values(obj.modelInstructions).some(v => typeof v !== "string" || !v.trim()))) {
 		throw new Error(`${path}: 'modelInstructions' must map provider/model selectors to non-empty file paths`);
 	}
@@ -196,7 +201,8 @@ export function loadConfig(path: string): ShiftConfig | undefined {
 	return {
 		enabled: obj.enabled !== false,
 		agents: Array.isArray(obj.agents) ? obj.agents.map(String) : ["main"],
-		rules: obj.rules as RuleConfig[],
+		rules: (obj.rules ?? []) as RuleConfig[],
+		afterCompaction: typeof obj.afterCompaction === "string" ? obj.afterCompaction.trim() : undefined,
 		logPath: typeof obj.logPath === "string" ? obj.logPath : DEFAULT_LOG_PATH,
 		epochShape,
 		debug: obj.debug === true || prune.debug === true,
@@ -357,7 +363,7 @@ export function restoreState(entries: readonly unknown[]): ShiftState {
 			state.cut = { rule, cutTs: d.cutTs };
 			if (d.repeat !== true) state.fired.add(rule);
 		}
-		if (d.event === "reverted") {
+		if (d.event === "reverted" || d.event === "after-compaction") {
 			state.applied = undefined;
 			if (typeof d.to === "string") state.lastProgrammatic = d.to;
 		}
@@ -402,6 +408,8 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	let lastPruneKey = "";
 	/** Most recent wire messages as the `context` hook received them, before this extension's pruning. */
 	let lastWire: readonly AgentMessage[] = [];
+	let compactionRunActive = false;
+	let pendingCompaction: { id: string; method?: string } | undefined;
 
 	function log(event: string, details: Record<string, unknown> = {}): void {
 		const path = process.env.OMP_GOVERNOR_LOG ?? config?.logPath ?? DEFAULT_LOG_PATH;
@@ -465,6 +473,8 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 
 	const onSession = (reason: string, ctx: SessionCtx) => {
 		reload();
+		pendingCompaction = undefined;
+		compactionRunActive = false;
 		const entries = ctx.sessionManager?.getEntries?.() ?? [];
 		state = restoreState(entries);
 		startedAt = firstTimestamp(entries) ?? Date.now();
@@ -478,6 +488,10 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		onSession("start", ctx as unknown as SessionCtx);
 		if (loadError) ctx.ui.notify(`[governor] Config rejected, engine disabled: ${loadError}`, "error");
 	});
+	pi.on("agent_start", () => {
+		compactionRunActive = true;
+	});
+
 	pi.on("session_switch", (_e, ctx) => {
 		lastCtx = ctx;
 		afk = false;
@@ -506,20 +520,67 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 	});
 
 	/** Queue an evaluation; returns when this one has finished. */
-	function schedule(ctx: EvalCtx, trigger: string, pruneOnly = false): Promise<void> {
-		chain = chain.then(() => evaluate(ctx, trigger, pruneOnly)).catch(err => log("error", { trigger, message: String(err) }));
+	function serialize(trigger: string, work: () => Promise<void>): Promise<void> {
+		chain = chain.then(work).catch(err => log("error", { trigger, message: String(err) }));
 		return chain;
 	}
+
+	function compactionTarget(ctx: EvalCtx): string | undefined {
+		if (config?.enabled && config.agents.includes(ctx.agent?.kind ?? "main")) return config.afterCompaction;
+	}
+
+	async function switchAfterCompaction(ctx: EvalCtx, entry: { id: string; method?: string }): Promise<boolean> {
+		const selector = compactionTarget(ctx);
+		if (!selector) return false;
+		const details = { compactionId: entry.id, method: entry.method, selector };
+		const warn = (reason: string) => {
+			log("after-compaction-skipped", { ...details, reason });
+			ctx.ui.notify(`[governor] After compaction: ${reason}`, "warning");
+			return false;
+		};
+		const from = modelKey(ctx.models.current());
+		const target = ctx.models.resolve(selector);
+		if (!target) return warn(`No available model matches '${selector}'.`);
+		if (from === modelKey(target)) return true;
+		try {
+			if (!(await pi.setModel(target))) return warn(`Could not select '${selector}'.`);
+		} catch (err) {
+			return warn(`Could not select '${selector}': ${err instanceof Error ? err.message : String(err)}`);
+		}
+		const to = modelKey(ctx.models.current() ?? target);
+		state.lastProgrammatic = to;
+		state.applied = undefined;
+		record({ event: "after-compaction", ...details, from, to });
+		ctx.ui.notify(`[governor] After compaction: ${from} → ${to}.`, "info");
+		return true;
+	}
+
+	pi.on("session_compact", ({ compactionEntry }, ctx) => {
+		if (!compactionTarget(ctx)) return;
+		const { id, method } = compactionEntry;
+		// OMP can detach the mid-turn hook; never race the next provider request.
+		if (compactionRunActive) {
+			pendingCompaction = { id, method };
+			return;
+		}
+		return serialize("session_compact", async () => { await switchAfterCompaction(ctx, { id, method }); });
+	});
 
 	// Mid-run: only prune-only rules may fire here; model and effort changes wait for agent_end.
 	pi.on("turn_end", async (_e, ctx) => {
 		lastCtx = ctx;
-		await schedule(ctx, "turn_end", true);
+		await serialize("turn_end", () => evaluate(ctx, "turn_end", true));
 	});
 
 	pi.on("agent_end", async (_e, ctx) => {
+		compactionRunActive = false;
 		lastCtx = ctx;
-		await schedule(ctx, "agent_end");
+		const compacted = pendingCompaction;
+		pendingCompaction = undefined;
+		await serialize("agent_end", async () => {
+			const selected = compacted ? await switchAfterCompaction(ctx, compacted) : false;
+			await evaluate(ctx, "agent_end", selected);
+		});
 	});
 
 	pi.events.on(AFK_CHANNEL, data => {
@@ -527,7 +588,11 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 		afk = data.active;
 		log("afk", { active: afk });
 		// Switch before agent-afk-omp sends its AFK/back prompt, but never mid-turn.
-		if (lastCtx?.isIdle() && typeof data.waitUntil === "function") data.waitUntil(schedule(lastCtx, afk ? "afk-on" : "afk-off"));
+		const ctx = lastCtx;
+		if (ctx?.isIdle() && typeof data.waitUntil === "function") {
+			const trigger = afk ? "afk-on" : "afk-off";
+			data.waitUntil(serialize(trigger, () => evaluate(ctx, trigger)));
+		}
 	});
 
 	async function evaluate(ctx: EvalCtx, trigger: string, pruneOnly = false): Promise<void> {
@@ -685,6 +750,7 @@ export default function sessionGovernorExtension(pi: ExtensionAPI) {
 			const lines = [
 				`governor: ${loadError ? `DISABLED (${loadError})` : !config ? `inert (no ${configPath})` : !config.enabled ? "disabled in config" : state.paused ? `armed; model rules paused (manual /model)${state.effortPaused ? ", effort rules paused (manual effort)" : ""}` : state.effortPaused ? "armed; effort rules paused (manual effort)" : "armed"}`,
 				`vars: cost=$${vars.cost.toFixed(4)} tokens=${vars.tokens}/${vars.context_window} (${vars.context_pct.toFixed(1)}%) turns=${vars.turns} elapsed_min=${vars.elapsed_min.toFixed(1)} model=${vars.model} agent=${vars.agent} turns_since_prune=${vars.turns_since_prune} prunable=${vars.prunable} blocked_streak=${vars.blocked_streak} attempts_on_goal=${vars.attempts_on_goal}`,
+				...(compactionTarget(ctx) ? [`after compaction: ${compactionTarget(ctx)}${pendingCompaction ? " (pending until run end)" : ""}`] : []),
 				...(pi.getAllTools().some(t => t.name === "progress") ? [] : ["WARNING: no `progress` tool (load agent-progress-tool-omp); blocked_streak/attempts_on_goal stay 0, stuck rules cannot fire"]),
 				`prune: cut=${state.cut ? `${new Date(state.cut.cutTs).toISOString()} (rule ${state.cut.rule})` : "none"}`,
 				lastPrune

@@ -74,6 +74,130 @@ describe("model-specific instructions", () => {
 	});
 });
 
+async function withCompactionGovernor(config: string, check: (fixture: {
+	compact: (method?: string) => Promise<void>;
+	start: () => void;
+	end: () => Promise<void>;
+	ctx: { agent: { kind: string } };
+	current: () => string;
+	lookups: string[];
+	switches: string[];
+	notices: string[];
+	entries: unknown[];
+}) => Promise<void>) {
+	const dir = mkdtempSync(join(tmpdir(), "gov-compaction-"));
+	const oldConfig = process.env.OMP_GOVERNOR_CONFIG;
+	const oldLog = process.env.OMP_GOVERNOR_LOG;
+	try {
+		const path = join(dir, "governor.yml");
+		writeFileSync(path, config);
+		process.env.OMP_GOVERNOR_CONFIG = path;
+		process.env.OMP_GOVERNOR_LOG = join(dir, "log.jsonl");
+		const handlers: Record<string, Function[]> = {};
+		const lookups: string[] = [];
+		const switches: string[] = [];
+		const notices: string[] = [];
+		const entries: unknown[] = [];
+		let model = { provider: "provider", id: "original" };
+		const ctx = {
+			agent: { kind: "main" },
+			get model() { return model; },
+			models: {
+				current: () => model,
+				resolve(selector: string) {
+					lookups.push(selector);
+					if (selector === "missing") return undefined;
+					return { provider: "provider", id: selector === "@default" ? "default" : selector.split("/").at(-1)! };
+				},
+			},
+			getContextUsage: () => undefined,
+			ui: { notify: (message: string) => notices.push(message) },
+			sessionManager: { getEntries: () => entries },
+		};
+		governor({
+			on: (name: string, fn: Function) => { (handlers[name] ??= []).push(fn); },
+			events: { on: () => {} },
+			registerCommand: () => {},
+			appendEntry: (customType: string, data: unknown) => { entries.push({ type: "custom", customType, data }); },
+			getThinkingLevel: () => "off",
+			setModel: async (target: typeof model) => {
+				if (target.id === "refused") return false;
+				if (target.id === "error") throw new Error("selection failed");
+				model = target;
+				switches.push(target.id);
+				return true;
+			},
+		} as never);
+		for (const handler of handlers.session_start) await handler({}, ctx);
+		let sequence = 0;
+		await check({
+			compact: async method => { await handlers.session_compact[0]({ compactionEntry: { id: `c${++sequence}`, method } }, ctx); },
+			start: () => { for (const handler of handlers.agent_start) handler({}, ctx); },
+			end: () => handlers.agent_end[0]({}, ctx),
+			ctx, current: () => model.id, lookups, switches, notices, entries,
+		});
+	} finally {
+		if (oldConfig === undefined) delete process.env.OMP_GOVERNOR_CONFIG;
+		else process.env.OMP_GOVERNOR_CONFIG = oldConfig;
+		if (oldLog === undefined) delete process.env.OMP_GOVERNOR_LOG;
+		else process.env.OMP_GOVERNOR_LOG = oldLog;
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+describe("model after compaction", () => {
+	test.each([undefined, "soft", "remote", "snapcompact", "handoff"])("committed %s compaction selects OMP default once", async method => {
+		await withCompactionGovernor("afterCompaction: '@default'\n", async ({ compact, lookups, switches, entries }) => {
+			await compact(method);
+			await compact(method);
+			expect(lookups).toEqual(["@default", "@default"]);
+			expect(switches).toEqual(["default"]);
+			expect(restoreState(entries).lastProgrammatic).toBe("provider/default");
+		});
+	});
+
+	test("defers active compaction until settle and wins over CEL model rules at that boundary", async () => {
+		const config = "afterCompaction: provider/chosen\nrules:\n  - when: 'true'\n    use: provider/rule\n";
+		await withCompactionGovernor(config, async ({ compact, start, end, current, switches, entries }) => {
+			start();
+			await compact("soft");
+			await compact("handoff");
+			expect(current()).toBe("original");
+			await end();
+			expect(switches).toEqual(["chosen"]);
+			expect(entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ method: "handoff" }) }));
+			start();
+			await end();
+			expect(switches).toEqual(["chosen", "rule"]);
+		});
+	});
+
+	test("honors opt-in, governor enablement, and agent scope", async () => {
+		await withCompactionGovernor("rules: []\n", async ({ compact, lookups }) => {
+			await compact("soft");
+			expect(lookups).toEqual([]);
+		});
+		await withCompactionGovernor("enabled: false\nafterCompaction: '@default'\n", async ({ compact, lookups }) => {
+			await compact("soft");
+			expect(lookups).toEqual([]);
+		});
+		await withCompactionGovernor("afterCompaction: '@default'\n", async ({ compact, ctx, lookups }) => {
+			ctx.agent.kind = "sub";
+			await compact("soft");
+			expect(lookups).toEqual([]);
+		});
+	});
+
+	test.each(["missing", "provider/refused", "provider/error"])("retains current model when %s cannot be selected", async selector => {
+		await withCompactionGovernor(`afterCompaction: '${selector}'\n`, async ({ compact, current, notices, entries }) => {
+			await compact("remote");
+			expect(current()).toBe("original");
+			expect(notices).toEqual([expect.stringContaining(selector)]);
+			expect(entries).toEqual([]);
+		});
+	});
+});
+
 const env = createEnvironment();
 const vars = (over: Partial<RuleVars> = {}): RuleVars => ({
 	turns_since_prune: 3n,
@@ -347,5 +471,12 @@ describe("loadConfig", () => {
 		const p = join(dir, "bad.yml");
 		writeFileSync(p, "rules: nope\n");
 		expect(() => loadConfig(p)).toThrow(/list/);
+	});
+	test("afterCompaction must be a non-empty selector", () => {
+		const p = join(dir, "bad-target.yml");
+		for (const value of ["false", "[]", "null", "'  '"]) {
+			writeFileSync(p, `afterCompaction: ${value}\n`);
+			expect(() => loadConfig(p)).toThrow(/afterCompaction.*non-empty/);
+		}
 	});
 });

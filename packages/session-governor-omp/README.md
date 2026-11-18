@@ -19,6 +19,28 @@ Why policy-driven pruning is in the governor:
 - If a rule switches the model and prunes at the same turn boundary, you pay for **one cold cache read**, not two.
 - Pruning uses a **latched cut point** (`cutTs`), so earlier tool outputs are elided while maintaining byte-level prefix stability across subsequent requests.
 
+## Model after compaction
+
+Set `afterCompaction` in `~/.omp/governor.yml` to use a model after a successful compaction:
+
+```yaml
+# Use OMP's configured default model role.
+afterCompaction: '@default'
+# Or set afterCompaction to an explicit selector such as 'provider/model-id'.
+```
+
+This changes the current session model, not OMP's default or the model that performs compaction.
+It applies to any method that saves a compaction entry, including manual `/compact`, soft, remote,
+snapcompact, and handoff. Failed or cancelled compactions and prune-only maintenance do not trigger it.
+If a run is active, the governor waits for `agent_end` rather than switch during a tool loop. The
+compaction selection takes precedence over CEL model and effort rules at that boundary. The setting
+is independent of the manual-model pause for CEL rules; it still obeys `enabled` and `agents`.
+If the target is unavailable, the governor warns and leaves the model unchanged.
+
+A model from another provider may not be able to use a remote compaction payload. OMP can then
+rebuild from older history, which can cause another compaction. Prefer a text-summary method such as
+`soft` when switching providers. Remove `afterCompaction` to turn this policy off.
+
 ## Model-specific instructions
 
 The governor can append a trusted instruction file for the main agent's current model. Add an exact
