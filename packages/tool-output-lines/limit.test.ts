@@ -72,6 +72,30 @@ describe("tool output line limit", () => {
     expect(saved).toBe(text);
   });
 
+  test("sampled raw ranges show source numbers to the model", async () => {
+    const text = Array.from({ length: 51 }, (_, i) => `row ${i + 220}`).join("\n");
+    for (const path of ["/x:220-270:raw", "/x:raw:220-270"]) {
+      const out = await limitResult({ toolName: "read", input: { path }, content: [{ type: "text", text }], details: { displayContent: { text, startLine: 220 } } }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+      const block = out!.content[0];
+      if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
+      const modelLines = block.text.split("\n");
+      expect(modelLines[0]).toBe("220| row 220");
+      expect(modelLines.at(-2)).toBe("270| row 270");
+      const display = out!.details!.displayContent;
+      if (!display || typeof display !== "object" || !("text" in display)) throw new Error("missing display");
+      expect(display.text).toBe(block.text);
+    }
+  });
+
+  test("sampled raw source lines keep numeric pipe content", async () => {
+    const text = Array.from({ length: 40 }, (_, i) => `${i + 1}|payload`).join("\n");
+    const out = await limitResult({ toolName: "read", input: { path: "/x:220-259:raw" }, content: [{ type: "text", text }] }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
+    const block = out!.content[0];
+    if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
+    expect(block.text.split("\n")[0]).toBe("220| 1|payload");
+    expect(block.text.split("\n").at(-2)).toBe("259| 40|payload");
+  });
+
   test("read stride notice is short; coordinate guidance lives in the session note", async () => {
     const text = Array.from({ length: 40 }, (_, i) => `${i + 101}|row ${i + 101}`).join("\n");
     const out = await limitResult({ toolName: "read", input: { path: "/x:101-140" }, content: [{ type: "text", text }], details: {} }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });

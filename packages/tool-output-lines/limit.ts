@@ -34,8 +34,8 @@ export type Context = { sessionManager: { saveArtifact(text: string, toolType: s
 
 // Evenly spaced sample points (first and last included), each with `before`/`after` context lines
 // like grep -B/-A. Each line carries its original number. Total stays within maxLines - 1.
-function sample(lines: string[], limits: Limits) {
-  const numbered = /^\s*\d+\|/.test(lines[0] ?? "");
+function sample(lines: string[], limits: Limits, startLine = 1, raw = false) {
+  const numbered = !raw && /^\s*\d+\|/.test(lines[0] ?? "");
   const budget = limits.maxLines - 1;
   const build = (points: number, before: number, after: number) => {
     const keep = new Set<number>();
@@ -44,7 +44,7 @@ function sample(lines: string[], limits: Limits) {
       for (let i = Math.max(0, center - before); i <= Math.min(lines.length - 1, center + after); i++) keep.add(i);
     }
     const picked = [...keep].sort((a, b) => a - b);
-    return { picked, text: picked.map(i => (numbered ? lines[i] : `${i + 1}| ${lines[i]}`)).join("\n") };
+    return { picked, text: picked.map(i => (numbered ? lines[i] : `${i + startLine}| ${lines[i]}`)).join("\n") };
   };
   let points = Math.max(2, Math.floor(budget / (1 + limits.before + limits.after)));
   let out = build(points, limits.before, limits.after);
@@ -72,10 +72,12 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     if (size <= limits.maxLines) return;
   }
 
+  const path = event.input?.path ?? event.input?.file_path;
+  const raw = typeof path === "string" && /(?:^|:)raw(?::|$)/.test(path);
+  const rawRange = raw && typeof path === "string" ? path.match(/:(\d+)(?:-\d+|\+\d+)(?::raw)?$/) : null;
+  const startLine = event.toolName === "read" && rawRange ? Number(rawRange[1]) : 1;
   let id: string | undefined = footer?.[3];
   try {
-    const path = event.input?.path ?? event.input?.file_path;
-    const raw = typeof path === "string" && /(?:^|:)raw(?::|$)/.test(path);
     const first = /^\[Skill file: .*\]$/.test(lines[0] ?? "") ? 1 : 0;
     const plain = event.toolName === "read" && !raw && /^\s*\d+\|/.test(lines[first] ?? "") ? lines.map((line, i) => i < first ? line : line.replace(/^\s*\d+(?:-\d+)?\|/, "")).join("\n") : text;
     if (!id) id = await ctx.sessionManager.saveArtifact(plain, "tool-output");
@@ -84,7 +86,7 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   }
   if (id === undefined) return;
 
-  const sampled = limits.mode !== "head" && lines.length > 2 ? sample(lines, limits) : undefined;
+  const sampled = limits.mode !== "head" && lines.length > 2 ? sample(lines, limits, startLine, raw) : undefined;
   const preview = sampled ? sampled.text : lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
   const sampling = sampled ? `sampled ${sampled.picked.length}/${lines.length} lines` : `${lines.length} lines`;
   const notice = footer
@@ -105,7 +107,6 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
       details.displayContent = { ...rest, text: `${preview}\n${notice}` };
       details.contentType = "text/plain"; // Markdown rendering would join the `N|` lines into paragraphs.
     }
-    const path = event.input?.path ?? event.input?.file_path;
     if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;
   }
   if (details && ["grep", "ast_grep", "ast_edit"].includes(event.toolName) && typeof details.displayContent === "string") {
