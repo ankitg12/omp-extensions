@@ -246,10 +246,14 @@ describe("tool output line limit", () => {
     const ui = { ui: { notify() {} } };
     await command("stride", ui);
     expect(JSON.stringify(await promptHooks[0]({ systemPrompt: "base" }))).toContain("evenly spaced sample");
+    const arrayStride = await promptHooks[0]({ systemPrompt: ["base", "second"] }) as { systemPrompt: string[] };
+    expect(Array.isArray(arrayStride.systemPrompt)).toBe(true);
+    expect(arrayStride.systemPrompt).toHaveLength(3);
+    expect(arrayStride.systemPrompt[2]).toContain("evenly spaced sample");
     await command("head", ui);
-    const headPrompt = JSON.stringify(await promptHooks[0]({ systemPrompt: "base" }));
-    expect(headPrompt).toContain("read <path>:START-END");
-    expect(headPrompt).not.toContain("evenly spaced sample");
+    const headPrompt = await promptHooks[0]({ systemPrompt: ["base"] }) as { systemPrompt: string[] };
+    expect(headPrompt.systemPrompt[1]).toContain("read <path>:START-END");
+    expect(headPrompt.systemPrompt[1]).not.toContain("evenly spaced sample");
   });
 
   test("/tool-lines off stops truncation for the session", async () => {

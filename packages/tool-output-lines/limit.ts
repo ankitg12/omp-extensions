@@ -211,7 +211,10 @@ export default function toolOutputLines(pi: Pi) {
     return limitResult(event, ctx, limits);
   });
   pi.on("before_agent_start", async event => {
-    if (override.off || typeof event.systemPrompt !== "string") return;
+    if (override.off) return;
+    const isString = typeof event.systemPrompt === "string";
+    const isArray = Array.isArray(event.systemPrompt) && event.systemPrompt.every(part => typeof part === "string");
+    if (!isString && !isArray) return;
     const sampling = (mode: unknown) => mode === "stride";
     let stride = sampling(override.mode);
     if (!stride && override.mode === undefined) {
@@ -221,7 +224,8 @@ export default function toolOutputLines(pi: Pi) {
       } catch {}
     }
     const { maxLines } = await loadLimits(configPath, "read");
-    return { systemPrompt: `${event.systemPrompt}\n\n${exactReadNote(maxLines)}${stride ? `\n\n${strideNote}` : ""}` };
+    const note = `${exactReadNote(maxLines)}${stride ? `\n\n${strideNote}` : ""}`;
+    return { systemPrompt: isArray ? [...(event.systemPrompt as string[]), note] : `${event.systemPrompt}\n\n${note}` };
   });
   pi.registerCommand?.("tool-lines", {
     description: "Session tool-output limit: status | off | on | head | stride | <lines>",
