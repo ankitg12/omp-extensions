@@ -112,7 +112,7 @@ describe("tool output line limit", () => {
     expect(text[0]).toBe("1|row 1");
     expect(text[8]).toBe("100|row 100");
     expect(text[9]).toContain("sampled 9/100");
-    expect(text[9]).toContain("artifact://7");
+    expect(text[9]).toContain("local://7.log");
   });
 
   test("stride mode numbers lines that arrive without numbers", async () => {
@@ -162,7 +162,8 @@ describe("tool output line limit", () => {
     expect(saved).toContain("x".repeat(100));
     const block = out!.content[0];
     if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
-    expect(block.text).toContain("artifact://5");
+    expect(block.text).toContain("local://5.log");
+    expect(block.text).not.toContain("sampled");
     expect(block.text.length).toBeLessThan(text.length);
   });
 
@@ -231,7 +232,7 @@ describe("tool output line limit", () => {
     const text = Array.from({ length: 40 }, (_, i) => `${i + 101}|row ${i + 101}`).join("\n");
     const out = await limitResult({ toolName: "read", input: { path: "/x:101-140" }, content: [{ type: "text", text }], details: {} }, { sessionManager: { saveArtifact: async () => "5" } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
     const notice = out!.content[0].text!.split("\n").at(-1)!;
-    expect(notice).toBe("[sampled 9/40 lines · artifact://5]");
+    expect(notice).toBe("[sampled 9/40 lines · local://5.log]");
   });
 
   test("terminal preview of read shows exactly the text the model receives, line numbers included", async () => {
@@ -257,8 +258,8 @@ describe("tool output line limit", () => {
     const result = block.text;
     expect(result).toContain("[sampled ");
     expect(result).toContain("OMP omitted 67 of 251 source lines");
-    expect(result).toContain("full output: artifact://68");
-    expect(result).not.toContain("artifact://5");
+    expect(result).toContain("full output: local://68.log");
+    expect(result).not.toContain("local://5.log");
     expect(result).not.toContain("[Showing lines");
     const display = out!.details!.displayContent;
     if (!display || typeof display !== "object" || !("text" in display)) throw new Error("missing display");
@@ -278,7 +279,7 @@ describe("tool output line limit", () => {
     expect(block.text).toContain("sampled");
     expect(block.text).toContain("OMP showed 1-70 of 129 source lines");
     expect(block.text).toContain("continue source at :71");
-    expect(block.text).toContain("partial result: artifact://5");
+    expect(block.text).toContain("partial result: local://5.log");
     expect(block.text).not.toContain("[Showing lines");
     const meta = out!.details!.meta;
     if (!meta || typeof meta !== "object") throw new Error("missing metadata");
@@ -302,7 +303,7 @@ describe("tool output line limit", () => {
     const out = await limitResult({ toolName: "read", content: [{ type: "text", text }], details: {} }, { sessionManager: { saveArtifact: async value => { saved = value; return "5"; } } }, { maxLines: 10, maxPreviewChars: 2000, mode: "stride", before: 0, after: 0 });
     const block = out!.content[0];
     if (!("text" in block) || typeof block.text !== "string") throw new Error("missing text");
-    expect(block.text).toContain("artifact://5");
+    expect(block.text).toContain("local://5.log");
     expect(saved).toContain("Read artifact://68 for full output");
   });
 
@@ -414,7 +415,7 @@ describe("tool output line limit", () => {
     const read = await limitResult({ toolName: "read", input: { path: "artifact://4" }, content: [{ type: "text", text }], details: { resolvedPath: "/long/path", displayContent: { text, startLine: 1, lineNumbers: Array.from({ length: 40 }, (_, i) => i + 1) } } }, ctx, limits);
     const display = read!.details!.displayContent as { text: string };
     expect(display.text.split("\n")).toHaveLength(10);
-    expect(display.text).toContain("artifact://7");
+    expect(display.text).toContain("local://7.log");
     expect(read!.details!.resolvedPath).toBeUndefined();
     const grep = await limitResult({ toolName: "grep", content: [{ type: "text", text }], details: { displayContent: text } }, ctx, limits);
     expect((grep!.details!.displayContent as string).split("\n")).toHaveLength(10);
@@ -425,7 +426,7 @@ describe("tool output line limit", () => {
     const output = await limitResult({ toolName: "eval", content: [{ type: "text", text }], details: { cells: [{ code: "print()", output: text, views: [{ text, view: { kind: "markdown", text } }] }] } }, { sessionManager: { saveArtifact: async () => "9" } }, { maxLines: 10, maxPreviewChars: 2000 });
     const cell = (output!.details!.cells as { output: string; views: unknown[] }[])[0];
     expect(cell.output.split("\n")).toHaveLength(10);
-    expect(cell.output).toContain("artifact://9");
+    expect(cell.output).toContain("local://9.log");
     expect(cell.views).toEqual([]);
   });
 
@@ -461,7 +462,7 @@ describe("tool output line limit", () => {
       expect(output).toBeDefined();
       const preview = output!.content[0].text!;
       expect(preview.split("\n")).toHaveLength(10);
-      expect(preview).toContain("[25 lines · full output: artifact://7]");
+      expect(preview).toContain("[25 lines · full output: local://7.log]");
       expect(saved).toBe(text);
       expect(output!.content[1]).toEqual(image);
     } finally { await rm(dir, { recursive: true, force: true }); }
