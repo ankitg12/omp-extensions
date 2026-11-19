@@ -23,6 +23,8 @@ In truncate mode, an explicit `read` range automatically uses the wrap budget in
 
 The agent receives the effective settings on its first result for each tool and whenever those settings change. Per-tool overrides and session commands are included.
 
+Set `"allowAgentMode": true` to let the agent choose the mode for an individual read. It appends `:wrap` or `:truncate` after any existing selector, for example `file.ts:10-20:raw:wrap`. The extension removes that suffix before the native read. Both choices use the configured row, width, and character budgets. Set `allowAgentMode` to `false` (the default) to disable the choice; it can also be overridden for `read` under `tools`.
+
 ## Long lines
 
 Set `longLines` globally or per tool, independently of `mode`:
@@ -31,7 +33,7 @@ Set `longLines` globally or per tool, independently of `mode`:
 - `wrap` counts each `lineWidth` characters as one visual row, without inserting newlines. It cuts the preview when the row budget is exhausted.
 - `truncate` shortens each long line to `lineWidth` characters, including an ellipsis.
 
-`lineWidth` defaults to 120. The count uses Unicode code points, not terminal cell widths; tabs, wide characters and terminal gutters can make the actual display wider. A notice reserves visual rows, but an unusually narrow width or a long notice can itself exceed the limit. The saved result retains the full received output. Explicit read ranges use the wrap budget in both wrap and truncate modes.
+`lineWidth` defaults to 120 terminal cells. The estimate uses Bun's terminal-width calculation and treats tabs as three cells, as OMP does. The terminal's actual width, gutters, ANSI controls, and renderer behavior can still affect displayed rows. A notice reserves visual rows, but an unusually narrow width or a long notice can itself exceed the limit. The saved result retains the full received output. Explicit read ranges use the wrap budget in both wrap and truncate modes unless the agent explicitly selects truncate.
 
 ```json
 { "maxLines": 30, "maxPreviewChars": 4000, "longLines": "wrap", "lineWidth": 120, "tools": { "read": { "mode": "stride" } } }

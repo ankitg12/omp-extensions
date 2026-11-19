@@ -1,10 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 const modes = ["head", "stride"];
 export type Mode = "head" | "stride";
-export type Limits = { maxLines: number; maxPreviewChars: number; mode: Mode; before: number; after: number; longLines?: "preserve" | "wrap" | "truncate"; lineWidth?: number };
+export type Limits = { maxLines: number; maxPreviewChars: number; mode: Mode; before: number; after: number; longLines?: "preserve" | "wrap" | "truncate"; lineWidth?: number; allowAgentMode?: boolean };
 const defaults: Limits = { maxLines: 10, maxPreviewChars: 2000, mode: "head", before: 0, after: 0 };
 const xdgConfig = process.env.XDG_CONFIG_HOME;
 const configPath = join(xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(homedir(), ".config"), "omp", "tool-output-lines.json");
@@ -13,15 +13,17 @@ export async function loadLimits(path = configPath, toolName = "") {
   try {
     const config = JSON.parse(await readFile(path, "utf8"));
     const valid = (value: unknown, min: number) => Number.isSafeInteger(value) && (value as number) >= min;
-    const global = { maxLines: config.maxLines, maxPreviewChars: config.maxPreviewChars, mode: config.mode ?? "head", before: config.before ?? 0, after: config.after ?? 0, ...(config.longLines !== undefined ? { longLines: config.longLines } : {}), ...(config.lineWidth !== undefined ? { lineWidth: config.lineWidth } : {}) };
+    const global = { maxLines: config.maxLines, maxPreviewChars: config.maxPreviewChars, mode: config.mode ?? "head", before: config.before ?? 0, after: config.after ?? 0, ...(config.longLines !== undefined ? { longLines: config.longLines } : {}), ...(config.lineWidth !== undefined ? { lineWidth: config.lineWidth } : {}), ...(config.allowAgentMode !== undefined ? { allowAgentMode: config.allowAgentMode } : {}) };
     if (!valid(global.maxLines, 2) || !valid(global.maxPreviewChars, 1) || !modes.includes(global.mode) || !valid(global.before, 0) || !valid(global.after, 0)) throw new Error("invalid defaults");
     if ((global.longLines !== undefined && !["preserve", "wrap", "truncate"].includes(global.longLines)) || (global.lineWidth !== undefined && !valid(global.lineWidth, 1))) throw new Error("invalid long-line limits");
+    if (global.allowAgentMode !== undefined && typeof global.allowAgentMode !== "boolean") throw new Error("invalid agent mode permission");
     if (config.tools !== undefined && (!config.tools || typeof config.tools !== "object" || Array.isArray(config.tools))) throw new Error("invalid tools");
     for (const override of Object.values(config.tools ?? {})) {
       if (!override || typeof override !== "object" || Array.isArray(override)) throw new Error("invalid tool override");
-      const limits = override as { maxLines?: unknown; maxPreviewChars?: unknown; mode?: unknown; before?: unknown; after?: unknown; longLines?: unknown; lineWidth?: unknown };
+      const limits = override as { maxLines?: unknown; maxPreviewChars?: unknown; mode?: unknown; before?: unknown; after?: unknown; longLines?: unknown; lineWidth?: unknown; allowAgentMode?: unknown };
       if ((limits.maxLines !== undefined && !valid(limits.maxLines, 2)) || (limits.maxPreviewChars !== undefined && !valid(limits.maxPreviewChars, 1)) || (limits.mode !== undefined && !modes.includes(limits.mode as string)) || (limits.before !== undefined && !valid(limits.before, 0)) || (limits.after !== undefined && !valid(limits.after, 0))) throw new Error("invalid tool limits");
       if ((limits.longLines !== undefined && !["preserve", "wrap", "truncate"].includes(limits.longLines as string)) || (limits.lineWidth !== undefined && !valid(limits.lineWidth, 1))) throw new Error("invalid tool long-line limits");
+      if (limits.allowAgentMode !== undefined && typeof limits.allowAgentMode !== "boolean") throw new Error("invalid tool agent mode permission");
     }
     return { ...global, ...(config.tools?.[toolName] ?? {}) } as Limits;
   } catch (error) {
@@ -31,12 +33,15 @@ export async function loadLimits(path = configPath, toolName = "") {
 }
 
 type Block = { type: string; text?: string; [key: string]: unknown };
-export type Result = { toolName: string; content: Block[]; details?: Record<string, unknown>; input?: { path?: unknown; file_path?: unknown } };
+export type Result = { toolName: string; toolCallId?: string; content: Block[]; details?: Record<string, unknown>; input?: { path?: unknown; file_path?: unknown } };
 export type Context = { sessionManager: { saveArtifact(text: string, toolType: string): Promise<string | undefined> } };
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const terminalWidth = (text: string) => Bun.stringWidth(text.replaceAll("\t", "   "), { countAnsiEscapeCodes: false });
 
 function visualRows(text: string, limits: Limits) {
   const width = limits.lineWidth ?? 120;
-  return text.split(/\r?\n/).reduce((sum, line) => sum + (limits.longLines === "wrap" ? Math.max(1, Math.ceil([...line].length / width)) : 1), 0);
+  return text.split(/\r?\n/).reduce((sum, line) => sum + (limits.longLines === "wrap" ? Math.max(1, Math.ceil(terminalWidth(line) / width)) : 1), 0);
 }
 
 function visualPreview(text: string, limits: Limits, budget: number) {
@@ -46,19 +51,30 @@ function visualPreview(text: string, limits: Limits, budget: number) {
   const result: string[] = [];
   for (const line of text.split(/\r?\n/)) {
     if (rows >= budget) break;
-    const chars = [...line];
-    if (limits.longLines === "truncate") {
-      result.push(chars.length > width ? chars.slice(0, Math.max(0, width - 1)).join("") + "…" : line);
-      rows++;
-    } else if (limits.longLines === "wrap") {
-      const available = (budget - rows) * width;
-      result.push(chars.slice(0, available).join(""));
-      rows += Math.max(1, Math.ceil(Math.min(chars.length, available) / width));
-      if (chars.length > available) break;
-    } else {
+    if (limits.longLines === "preserve") {
       result.push(line);
       rows++;
+      continue;
     }
+    const lineWidth = terminalWidth(line);
+    const available = limits.longLines === "truncate" ? width : (budget - rows) * width;
+    if (lineWidth <= available) {
+      result.push(line);
+      rows += limits.longLines === "truncate" ? 1 : Math.max(1, Math.ceil(lineWidth / width));
+      continue;
+    }
+    const cap = Math.max(0, available - (limits.longLines === "truncate" ? 1 : 0));
+    let used = 0;
+    let end = 0;
+    for (const part of graphemes.segment(line)) {
+      const partWidth = terminalWidth(part.segment);
+      if (used + partWidth > cap) break;
+      used += partWidth;
+      end = part.index + part.segment.length;
+    }
+    result.push(line.slice(0, end) + (limits.longLines === "truncate" ? "…" : ""));
+    rows += limits.longLines === "truncate" ? 1 : Math.max(1, Math.ceil(used / width));
+    if (limits.longLines === "wrap") break;
   }
   return result.join("\n").slice(0, limits.maxPreviewChars);
 }
@@ -92,7 +108,7 @@ function matchingReadDisplay(event: Result, text: string) {
   return { ...event.details, contentType: "text/plain", displayContent: { ...rest, startLine: 1, text } };
 }
 
-export async function limitResult(event: Result, ctx: Context, limits: Limits = defaults) {
+export async function limitResult(event: Result, ctx: Context, limits: Limits = defaults, explicitMode = false) {
   const text = event.content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n");
   const originalDisplay = () => {
     const details = matchingReadDisplay(event, text);
@@ -101,8 +117,8 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   const allLines = text.split(/\r?\n/);
   const selector = event.toolName === "read" ? String(event.input?.path ?? event.input?.file_path ?? "").replace(/^[A-Za-z]:/, "").match(/(?::raw)?:(\d+)(?:-(\d+)|\+(\d+))(?::raw)?$|(?::raw:(\d+)|(\d+):raw)$/) : null;
   const explicitInLimit = selector !== null && (selector[1] ? selector[2] ? Number(selector[2]) - Number(selector[1]) + 1 : Number(selector[3]) : 1) <= limits.maxLines + 1;
-  const effectiveLimits = explicitInLimit && limits.longLines === "truncate" ? { ...limits, longLines: "wrap" as const } : limits;
-  const longLineChanged = effectiveLimits.longLines === "truncate" && allLines.some(line => [...line].length > (effectiveLimits.lineWidth ?? 120));
+  const effectiveLimits = !explicitMode && explicitInLimit && limits.longLines === "truncate" ? { ...limits, longLines: "wrap" as const } : limits;
+  const longLineChanged = effectiveLimits.longLines === "truncate" && allLines.some(line => terminalWidth(line) > (effectiveLimits.lineWidth ?? 120));
   if (visualRows(text, effectiveLimits) <= effectiveLimits.maxLines && text.length <= effectiveLimits.maxPreviewChars && !longLineChanged) return originalDisplay();
   const candidate = event.toolName === "read" ? allLines.at(-1)?.match(/^\[Showing lines .+ of (\d+); (\d+) middle lines \([^\]]+\) elided\..*Read (?:local:\/\/([^\s.\]]+)\.log|artifact:\/\/([^\s\]]+)) for full output\]$/) : null;
   const candidateId = candidate?.[3] ?? candidate?.[4];
@@ -132,12 +148,13 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
 
   const spillUri = `local://${id}.log`;
   const sampled = limits.mode === "stride" && !explicitInLimit && lines.length > 2 ? sample(lines, limits, startLine, raw) : undefined;
-  const widthMode = limits.longLines && limits.longLines !== "preserve";
+  const widthMode = effectiveLimits.longLines && effectiveLimits.longLines !== "preserve";
   const sampling = sampled ? `sampled ${sampled.picked.length}/${lines.length} lines` : `${lines.length} lines`;
-  const notice = footer
+  let notice = footer
     ? `[${sampling} · OMP omitted ${footer[2]} of ${footer[1]} source lines · full output: ${spillUri}]`
     : continuation ? `[${sampling} · OMP showed ${continuation[1]}-${continuation[2]} of ${continuation[3]} source lines · continue source at :${continuation[4]} · partial result: ${spillUri}]`
     : sampled ? `[${sampling} · ${spillUri}]` : `[${sampling} · full output: ${spillUri}]`;
+  if (widthMode && !footer && !continuation && visualRows(notice, { ...effectiveLimits, longLines: "wrap" }) >= limits.maxLines) notice = spillUri;
   const noticeRows = widthMode ? visualRows(notice, { ...effectiveLimits, longLines: "wrap" }) : 1;
   const preview = widthMode
     ? visualPreview(sampled ? sampled.text : lines.join("\n"), effectiveLimits, Math.max(0, effectiveLimits.maxLines - noticeRows))
@@ -153,13 +170,14 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     if (display && typeof display === "object" && "text" in display && typeof display.text === "string") {
       // Show the exact text the model receives, line-number prefixes included, so a regression is visible.
       const { lineNumbers: _gutter, ...rest } = display as Record<string, unknown>;
-      details.displayContent = { ...rest, startLine: 1, text: `${preview}\n${notice}` };
+      details.displayContent = { ...rest, startLine: 1, text: `${preview}${preview ? "\n" : ""}${notice}` };
       details.contentType = "text/plain"; // Markdown rendering would join the `N|` lines into paragraphs.
     }
     if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;
   }
   if (details && ["grep", "ast_grep", "ast_edit"].includes(event.toolName) && typeof details.displayContent === "string") {
-    details.displayContent = `${widthMode ? visualPreview(details.displayContent, effectiveLimits, Math.max(0, effectiveLimits.maxLines - noticeRows)) : details.displayContent.split(/\r?\n/).slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`;
+    const visible = widthMode ? visualPreview(details.displayContent, effectiveLimits, Math.max(0, effectiveLimits.maxLines - noticeRows)) : details.displayContent.split(/\r?\n/).slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
+    details.displayContent = `${visible}${visible ? "\n" : ""}${notice}`;
   }
   if (details && event.toolName === "glob" && Array.isArray(details.files)) {
     delete details.fileCount;
@@ -196,7 +214,7 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
       return { ...cell, output, views: [] };
     });
   }
-  return { content: [{ type: "text", text: `${preview}\n${notice}` }, ...nonText], ...(details ? { details } : {}) };
+  return { content: [{ type: "text", text: `${preview}${preview ? "\n" : ""}${notice}` }, ...nonText], ...(details ? { details } : {}) };
 }
 
 export type Override = { off: boolean; maxLines?: number; mode?: Mode; before?: number; after?: number };
@@ -231,6 +249,7 @@ const strideNote = [
 ].join(" ");
 
 type Pi = {
+  on(name: "tool_call", handler: (event: { toolName: string; toolCallId: string; input: Record<string, unknown> }, ctx: { cwd: string }) => Promise<unknown>): void;
   on(name: "tool_result", handler: (event: Result, ctx: Context) => Promise<unknown>): void;
   on(name: "before_agent_start", handler: (event: { systemPrompt?: unknown }) => Promise<unknown>): void;
   registerCommand?: (name: string, def: { description?: string; handler: (args: string, ctx: { ui: { notify(message: string, level?: string): void } }) => Promise<void> }) => void;
@@ -239,17 +258,38 @@ type Pi = {
 export default function toolOutputLines(pi: Pi, settingsPath = configPath) {
   let override: Override = { off: false };
   const lastSettings = new Map<string, string>();
+  const readModes = new Map<string, "wrap" | "truncate">();
+  pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName !== "read") return;
+    const path = event.input.path;
+    if (typeof path !== "string") return;
+    const match = path.match(/^(.*):(wrap|truncate)$/);
+    if (!match || !match[1]) return;
+    if (!/^[a-z][a-z\d+.-]*:\/\//i.test(path)) {
+      const literal = path === "~" || path.startsWith("~/") ? homedir() + path.slice(1) : path;
+      try { if ((await stat(resolve(ctx.cwd, literal))).isFile()) return; } catch {}
+    }
+    const limits = await loadLimits(settingsPath, "read");
+    if (!limits.allowAgentMode || override.off) return { block: true, reason: "Per-read output modes are disabled by the human configuration." };
+    readModes.set(event.toolCallId, match[2] as "wrap" | "truncate");
+    return { input: { ...event.input, path: match[1] } };
+  });
   pi.on("tool_result", async (event, ctx) => {
     const limits = await loadLimits(settingsPath, event.toolName);
     if (override.maxLines) limits.maxLines = override.maxLines;
     if (override.mode) limits.mode = override.mode;
     if (override.before !== undefined) limits.before = override.before;
     if (override.after !== undefined) limits.after = override.after;
-    const settings = override.off ? "off" : `maxLines=${limits.maxLines}, maxPreviewChars=${limits.maxPreviewChars}, mode=${limits.mode}, longLines=${limits.longLines ?? "preserve"}, lineWidth=${limits.lineWidth ?? 120}, before=${limits.before}, after=${limits.after}`;
+    const settings = override.off ? "off" : `maxLines=${limits.maxLines}, maxPreviewChars=${limits.maxPreviewChars}, mode=${limits.mode}, longLines=${limits.longLines ?? "preserve"}, lineWidth=${limits.lineWidth ?? 120}, before=${limits.before}, after=${limits.after}, allowAgentMode=${limits.allowAgentMode ?? false}`;
     const changed = lastSettings.get(event.toolName) !== settings;
     lastSettings.set(event.toolName, settings);
-    const result = override.off ? undefined : await limitResult(event, ctx, limits);
-    return changed ? { ...result, additionalContext: `tool-output-lines settings for ${event.toolName}: ${settings}.` } : result;
+    const selectedMode = event.toolCallId ? readModes.get(event.toolCallId) : undefined;
+    if (event.toolCallId) readModes.delete(event.toolCallId);
+    const activeMode = limits.allowAgentMode ? selectedMode : undefined;
+    if (activeMode) limits.longLines = activeMode;
+    const result = override.off ? undefined : await limitResult(event, ctx, limits, activeMode !== undefined);
+    const choices = event.toolName === "read" && limits.allowAgentMode && !override.off ? " Append :wrap or :truncate to the read path to choose this call's mode; the configured budgets still apply." : "";
+    return changed ? { ...result, additionalContext: `tool-output-lines settings for ${event.toolName}: ${settings}.${choices}` } : result;
   });
   pi.on("before_agent_start", async event => {
     if (override.off) return;
@@ -264,8 +304,9 @@ export default function toolOutputLines(pi: Pi, settingsPath = configPath) {
         stride = sampling(config.mode) || Object.values(config.tools ?? {}).some(tool => !!tool && typeof tool === "object" && "mode" in tool && sampling(tool.mode));
       } catch {}
     }
-    const { maxLines } = await loadLimits(settingsPath, "read");
-    const note = `${exactReadNote(maxLines)} For long lines, request a shorter explicit read range: it uses the visual-row budget rather than per-line truncation. A line that exceeds the budget still needs character slicing by another authorized method.${stride ? `\n\n${strideNote}` : ""}`;
+    const { maxLines, allowAgentMode } = await loadLimits(settingsPath, "read");
+    const choices = allowAgentMode ? " To choose the output mode for one read, append :wrap or :truncate to its path; both obey the configured visual budget." : "";
+    const note = `${exactReadNote(maxLines)} For long lines, request a shorter explicit read range: it uses the visual-row budget rather than per-line truncation. A line that exceeds the budget still needs character slicing by another authorized method.${choices}${stride ? `\n\n${strideNote}` : ""}`;
     return { systemPrompt: isArray ? [...(event.systemPrompt as string[]), note] : `${event.systemPrompt}\n\n${note}` };
   });
   pi.registerCommand?.("tool-lines", {

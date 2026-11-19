@@ -7,6 +7,58 @@ import toolOutputLines, { limitResult, loadLimits, parseCommand, type Context, t
 
 
 describe("explicit reads and settings notifications", () => {
+  test("agent mode permission inherits and validates per-tool settings", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "output-mode-"));
+    try {
+      const path = join(dir, "settings.json");
+      await writeFile(path, JSON.stringify({ maxLines: 10, maxPreviewChars: 2000, allowAgentMode: true, tools: { read: { allowAgentMode: false } } }));
+      expect((await loadLimits(path, "read")).allowAgentMode).toBe(false);
+      expect((await loadLimits(path, "bash")).allowAgentMode).toBe(true);
+      await writeFile(path, JSON.stringify({ maxLines: 10, maxPreviewChars: 2000, allowAgentMode: "true" }));
+      expect((await loadLimits(path, "read")).allowAgentMode).toBeUndefined();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+  test("agent modes are opt-in, per-call, and retain the user's limits", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "output-mode-"));
+    try {
+      const path = join(dir, "settings.json");
+      const settings = { maxLines: 5, maxPreviewChars: 10000, longLines: "wrap", lineWidth: 40, allowAgentMode: true };
+      await writeFile(path, JSON.stringify(settings));
+      type Call = { toolName: string; toolCallId: string; input: { path: string } };
+      type HookResult = { input?: { path: string }; block?: boolean; reason?: string; content?: { text: string }[]; additionalContext?: string } | undefined;
+      const handlers: Record<string, (...args: never[]) => Promise<HookResult>> = {};
+      toolOutputLines({ on: ((name: string, handler: (...args: never[]) => Promise<HookResult>) => { handlers[name] = handler; }) as never }, path);
+      const enabledPrompt = await handlers.before_agent_start({ systemPrompt: "base" } as never);
+      expect(JSON.stringify(enabledPrompt)).toContain(":wrap or :truncate");
+      const invokeCall = (call: Call) => handlers.tool_call(call as never, { cwd: dir } as never);
+      const ctx = { sessionManager: { saveArtifact: async () => "7" } };
+      const text = "x".repeat(120);
+      const truncate = await invokeCall({ toolName: "read", toolCallId: "a", input: { path: "/x:1-1:raw:truncate" } });
+      const wrap = await invokeCall({ toolName: "read", toolCallId: "b", input: { path: "/x:1-1:raw:wrap" } });
+      expect(truncate!.input!.path).toBe("/x:1-1:raw");
+      expect(wrap!.input!.path).toBe("/x:1-1:raw");
+      const event = { toolName: "read", input: { path: "/x:1-1:raw" }, content: [{ type: "text", text }] };
+      const wrapped = await handlers.tool_result({ ...event, toolCallId: "b" } as never, ctx as never);
+      expect(wrapped?.content).toBeUndefined();
+      expect(wrapped!.additionalContext).toContain("allowAgentMode=true");
+      expect(wrapped!.additionalContext).toContain(":wrap or :truncate");
+      const truncated = await handlers.tool_result({ ...event, toolCallId: "a" } as never, ctx as never);
+      expect(truncated!.content![0].text).toContain(`${"x".repeat(39)}…`);
+      expect(rows(truncated!.content![0].text, 40)).toBeLessThanOrEqual(5);
+      expect(await handlers.tool_result(event as never, ctx as never)).toBeUndefined();
+      await writeFile(path, JSON.stringify({ ...settings, allowAgentMode: false }));
+      const literal = join(dir, "file:wrap");
+      await writeFile(literal, "literal file");
+      expect(await invokeCall({ toolName: "read", toolCallId: "literal", input: { path: literal } })).toBeUndefined();
+      const blocked = await invokeCall({ toolName: "read", toolCallId: "c", input: { path: "/x:wrap" } });
+      expect(blocked!.block).toBe(true);
+      const changed = await handlers.tool_result(event as never, ctx as never);
+      expect(changed!.additionalContext).toContain("allowAgentMode=false");
+      expect(changed!.additionalContext).not.toContain(":wrap or :truncate");
+      const disabledPrompt = await handlers.before_agent_start({ systemPrompt: "base" } as never);
+      expect(JSON.stringify(disabledPrompt)).not.toContain(":wrap or :truncate");
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
   test("notifies the agent after settings change, once per tool", async () => {
     const dir = await mkdtemp(join(tmpdir(), "output-limit-"));
     try {
@@ -48,6 +100,14 @@ describe("long-line modes", () => {
     expect(saved).toBe(text);
     expect(output!.content[0].text).toContain(`${"a".repeat(39)}…\nshort`);
     expect(rows(output!.content[0].text!, 40)).toBeLessThanOrEqual(5);
+  });
+  test("counts terminal cells for wide characters and tabs", async () => {
+    const wide = "界".repeat(80);
+    const output = await limitResult({ toolName: "bash", content: [{ type: "text", text: wide }] }, widthStore, { ...widthLimits, longLines: "truncate" });
+    expect(Bun.stringWidth(output!.content[0].text!.split("\n")[0])).toBeLessThanOrEqual(40);
+    const tabs = "\t".repeat(20);
+    const tabOutput = await limitResult({ toolName: "bash", content: [{ type: "text", text: tabs }] }, widthStore, { ...widthLimits, longLines: "truncate" });
+    expect(tabOutput!.content[0].text!.split("\n")[0]).toBe(`${"\t".repeat(13)}…`);
   });
   test("preserve retains the existing behavior", async () => {
     const text = "x".repeat(1000);
