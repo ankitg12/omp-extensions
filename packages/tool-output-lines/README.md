@@ -17,9 +17,23 @@ Configure `$XDG_CONFIG_HOME/omp/tool-output-lines.json`, or `~/.config/omp/tool-
 }
 ```
 
+## Long lines
+
+Set `longLines` globally or per tool, independently of `mode`:
+
+- `preserve` (default) counts newline-delimited lines, as before.
+- `wrap` counts each `lineWidth` characters as one visual row, without inserting newlines. It cuts the preview when the row budget is exhausted.
+- `truncate` shortens each long line to `lineWidth` characters, including an ellipsis.
+
+`lineWidth` defaults to 120. The count uses Unicode code points, not terminal cell widths; tabs, wide characters and terminal gutters can make the actual display wider. A notice reserves visual rows, but an unusually narrow width or a long notice can itself exceed the limit. The saved result retains the full received output. These modes also apply to explicit read ranges.
+
+```json
+{ "maxLines": 30, "maxPreviewChars": 4000, "longLines": "wrap", "lineWidth": 120, "tools": { "read": { "mode": "stride" } } }
+```
+
 ## Modes: head and stride
 
-`"mode": "head"` (default) keeps the first lines. `"mode": "stride"` keeps evenly spaced lines from the tool result. A `read` with an explicit range within the line limit (`path:START-END` or `path:START+COUNT`) is kept intact only when it also fits the character limit, even though OMP adds context lines and a footer around it. The terminal preview of `read` shows exactly the text the model receives, line-number prefixes included. For a sampled `read`, use `read <original-path>:START-END` with the displayed source line numbers to zoom in. An artifact contains the saved tool result, which can already be a range or summary; its line numbers are relative to that result and may not match the source. For other tools, `read artifact://ID:START-END` uses result line numbers. The extension adds a note to the system prompt on every prompt that says how to get exact lines: request a range within the limit. When stride is active, the note also explains sampled results; each sampled result carries only a short `[sampled K/N lines · artifact://ID]` notice. Set `mode` globally or per tool:
+`"mode": "head"` (default) keeps the first lines. `"mode": "stride"` keeps evenly spaced lines from the tool result. In `preserve` mode, a `read` with an explicit range within the line limit (`path:START-END`, `path:raw:START-END`, or `path:START+COUNT`) is kept intact when it also fits the character limit (and head-truncated rather than stride-sampled if long lines exceed the character limit), even though OMP adds context lines and a footer around it. The terminal preview of `read` shows exactly the text the model receives, line-number prefixes included. For a sampled `read`, use `read <original-path>:START-END` with the displayed source line numbers to zoom in. A spill file (`local://ID.log`) contains the saved tool result, which can already be a range or summary; its line numbers are relative to that result and may not match the source. For other tools, `read local://ID.log:START-END` uses result line numbers. The extension adds a note to the system prompt (`string` or `string[]`) on every prompt that says how to get exact lines: request a range within the limit. When stride is active, the note also explains sampled results; each sampled result carries only a short `[sampled K/N lines · local://ID.log]` notice. Set `mode` globally or per tool:
 
 ```json
 { "maxLines": 10, "maxPreviewChars": 2000, "tools": { "read": { "mode": "stride", "before": 1, "after": 1 } } }

@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 
 const modes = ["head", "stride"];
 export type Mode = "head" | "stride";
-export type Limits = { maxLines: number; maxPreviewChars: number; mode: Mode; before: number; after: number };
+export type Limits = { maxLines: number; maxPreviewChars: number; mode: Mode; before: number; after: number; longLines?: "preserve" | "wrap" | "truncate"; lineWidth?: number };
 const defaults: Limits = { maxLines: 10, maxPreviewChars: 2000, mode: "head", before: 0, after: 0 };
 const xdgConfig = process.env.XDG_CONFIG_HOME;
 const configPath = join(xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(homedir(), ".config"), "omp", "tool-output-lines.json");
@@ -13,13 +13,15 @@ export async function loadLimits(path = configPath, toolName = "") {
   try {
     const config = JSON.parse(await readFile(path, "utf8"));
     const valid = (value: unknown, min: number) => Number.isSafeInteger(value) && (value as number) >= min;
-    const global = { maxLines: config.maxLines, maxPreviewChars: config.maxPreviewChars, mode: config.mode ?? "head", before: config.before ?? 0, after: config.after ?? 0 };
+    const global = { maxLines: config.maxLines, maxPreviewChars: config.maxPreviewChars, mode: config.mode ?? "head", before: config.before ?? 0, after: config.after ?? 0, ...(config.longLines !== undefined ? { longLines: config.longLines } : {}), ...(config.lineWidth !== undefined ? { lineWidth: config.lineWidth } : {}) };
     if (!valid(global.maxLines, 2) || !valid(global.maxPreviewChars, 1) || !modes.includes(global.mode) || !valid(global.before, 0) || !valid(global.after, 0)) throw new Error("invalid defaults");
+    if ((global.longLines !== undefined && !["preserve", "wrap", "truncate"].includes(global.longLines)) || (global.lineWidth !== undefined && !valid(global.lineWidth, 1))) throw new Error("invalid long-line limits");
     if (config.tools !== undefined && (!config.tools || typeof config.tools !== "object" || Array.isArray(config.tools))) throw new Error("invalid tools");
     for (const override of Object.values(config.tools ?? {})) {
       if (!override || typeof override !== "object" || Array.isArray(override)) throw new Error("invalid tool override");
-      const limits = override as { maxLines?: unknown; maxPreviewChars?: unknown; mode?: unknown; before?: unknown; after?: unknown };
+      const limits = override as { maxLines?: unknown; maxPreviewChars?: unknown; mode?: unknown; before?: unknown; after?: unknown; longLines?: unknown; lineWidth?: unknown };
       if ((limits.maxLines !== undefined && !valid(limits.maxLines, 2)) || (limits.maxPreviewChars !== undefined && !valid(limits.maxPreviewChars, 1)) || (limits.mode !== undefined && !modes.includes(limits.mode as string)) || (limits.before !== undefined && !valid(limits.before, 0)) || (limits.after !== undefined && !valid(limits.after, 0))) throw new Error("invalid tool limits");
+      if ((limits.longLines !== undefined && !["preserve", "wrap", "truncate"].includes(limits.longLines as string)) || (limits.lineWidth !== undefined && !valid(limits.lineWidth, 1))) throw new Error("invalid tool long-line limits");
     }
     return { ...global, ...(config.tools?.[toolName] ?? {}) } as Limits;
   } catch (error) {
@@ -31,6 +33,35 @@ export async function loadLimits(path = configPath, toolName = "") {
 type Block = { type: string; text?: string; [key: string]: unknown };
 export type Result = { toolName: string; content: Block[]; details?: Record<string, unknown>; input?: { path?: unknown; file_path?: unknown } };
 export type Context = { sessionManager: { saveArtifact(text: string, toolType: string): Promise<string | undefined> } };
+
+function visualRows(text: string, limits: Limits) {
+  const width = limits.lineWidth ?? 120;
+  return text.split(/\r?\n/).reduce((sum, line) => sum + (limits.longLines === "wrap" ? Math.max(1, Math.ceil([...line].length / width)) : 1), 0);
+}
+
+function visualPreview(text: string, limits: Limits, budget: number) {
+  if (budget <= 0) return "";
+  const width = limits.lineWidth ?? 120;
+  let rows = 0;
+  const result: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (rows >= budget) break;
+    const chars = [...line];
+    if (limits.longLines === "truncate") {
+      result.push(chars.length > width ? chars.slice(0, Math.max(0, width - 1)).join("") + "…" : line);
+      rows++;
+    } else if (limits.longLines === "wrap") {
+      const available = (budget - rows) * width;
+      result.push(chars.slice(0, available).join(""));
+      rows += Math.max(1, Math.ceil(Math.min(chars.length, available) / width));
+      if (chars.length > available) break;
+    } else {
+      result.push(line);
+      rows++;
+    }
+  }
+  return result.join("\n").slice(0, limits.maxPreviewChars);
+}
 
 // Evenly spaced sample points (first and last included), each with `before`/`after` context lines
 // like grep -B/-A. Each line carries its original number. Total stays within maxLines - 1.
@@ -68,27 +99,27 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     return details ? { content: event.content, details } : undefined;
   };
   const allLines = text.split(/\r?\n/);
-  if (allLines.length <= limits.maxLines && text.length <= limits.maxPreviewChars) return originalDisplay();
-  const candidate = event.toolName === "read" ? allLines.at(-1)?.match(/^\[Showing lines .+ of (\d+); (\d+) middle lines \([^\]]+\) elided\..*Read artifact:\/\/([^\s\]]+) for full output\]$/) : null;
+  const longLineChanged = limits.longLines === "truncate" && allLines.some(line => [...line].length > (limits.lineWidth ?? 120));
+  if (visualRows(text, limits) <= limits.maxLines && text.length <= limits.maxPreviewChars && !longLineChanged) return originalDisplay();
+  const candidate = event.toolName === "read" ? allLines.at(-1)?.match(/^\[Showing lines .+ of (\d+); (\d+) middle lines \([^\]]+\) elided\..*Read (?:local:\/\/([^\s.\]]+)\.log|artifact:\/\/([^\s\]]+)) for full output\]$/) : null;
+  const candidateId = candidate?.[3] ?? candidate?.[4];
   const meta = event.details?.meta;
   const truncation = meta && typeof meta === "object" && "truncation" in meta ? meta.truncation : undefined;
-  const footer = candidate && truncation && typeof truncation === "object" && "artifactId" in truncation && truncation.artifactId === candidate[3] ? candidate : null;
+  const footer = candidate && truncation && typeof truncation === "object" && "artifactId" in truncation && truncation.artifactId === candidateId ? candidate : null;
   const page = event.toolName === "read" ? allLines.at(-1)?.match(/^\[Showing lines (\d+)-(\d+) of (\d+) \([^\]]+ limit\)\. Use :(\d+) to continue\]$/) : null;
   const pageMeta = truncation && typeof truncation === "object" && "shownRange" in truncation && typeof truncation.shownRange === "object" && truncation.shownRange && "start" in truncation.shownRange && "end" in truncation.shownRange ? truncation.shownRange : undefined;
   const continuation = page && pageMeta && pageMeta.start === Number(page[1]) && pageMeta.end === Number(page[2]) && "totalLines" in truncation && truncation.totalLines === Number(page[3]) && "nextOffset" in truncation && truncation.nextOffset === Number(page[4]) ? page : null;
   const lines = footer || continuation ? allLines.slice(0, -1) : allLines;
   // An explicit range within the limit is a request for exact lines; OMP adds context lines and a footer around it.
-  const selector = event.toolName === "read" ? String(event.input?.path ?? event.input?.file_path ?? "").replace(/^[A-Za-z]:/, "").match(/:(\d+)(?:-(\d+)|\+(\d+))?(?::raw)?$/) : null;
-  if (selector) {
-    const size = selector[2] ? Number(selector[2]) - Number(selector[1]) + 1 : selector[3] ? Number(selector[3]) : 1;
-    if (size <= limits.maxLines && text.length <= limits.maxPreviewChars) return originalDisplay();
-  }
+  const selector = event.toolName === "read" ? String(event.input?.path ?? event.input?.file_path ?? "").replace(/^[A-Za-z]:/, "").match(/(?::raw)?:(\d+)(?:-(\d+)|\+(\d+))?(?::raw)?$/) : null;
+  const explicitInLimit = selector !== null && (selector[2] ? Number(selector[2]) - Number(selector[1]) + 1 : selector[3] ? Number(selector[3]) : 1) <= limits.maxLines + 1;
+  if (explicitInLimit && text.length <= limits.maxPreviewChars && (limits.longLines === undefined || limits.longLines === "preserve")) return originalDisplay();
 
   const path = event.input?.path ?? event.input?.file_path;
   const raw = typeof path === "string" && /(?:^|:)raw(?::|$)/.test(path);
-  const rawRange = raw && typeof path === "string" ? path.match(/:(\d+)(?:-\d+|\+\d+)(?::raw)?$/) : null;
+  const rawRange = raw && typeof path === "string" ? path.match(/(?::raw)?:(\d+)(?:-\d+|\+\d+)(?::raw)?$/) : null;
   const startLine = event.toolName === "read" && rawRange ? Number(rawRange[1]) : 1;
-  let id: string | undefined = footer?.[3];
+  let id: string | undefined = footer ? candidateId : undefined;
   try {
     const first = /^\[Skill file: .*\]$/.test(lines[0] ?? "") ? 1 : 0;
     const plain = event.toolName === "read" && !raw && /^\s*\d+\|/.test(lines[first] ?? "") ? lines.map((line, i) => i < first ? line : line.replace(/^\s*\d+(?:-\d+)?\|/, "")).join("\n") : text;
@@ -98,13 +129,18 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   }
   if (id === undefined) return;
 
-  const sampled = limits.mode !== "head" && lines.length > 2 ? sample(lines, limits, startLine, raw) : undefined;
-  const preview = sampled ? sampled.text : lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
+  const spillUri = `local://${id}.log`;
+  const sampled = limits.mode === "stride" && !explicitInLimit && lines.length > 2 ? sample(lines, limits, startLine, raw) : undefined;
+  const widthMode = limits.longLines && limits.longLines !== "preserve";
   const sampling = sampled ? `sampled ${sampled.picked.length}/${lines.length} lines` : `${lines.length} lines`;
   const notice = footer
-    ? `[${sampling} · OMP omitted ${footer[2]} of ${footer[1]} source lines · full output: artifact://${id}]`
-    : continuation ? `[${sampling} · OMP showed ${continuation[1]}-${continuation[2]} of ${continuation[3]} source lines · continue source at :${continuation[4]} · partial result: artifact://${id}]`
-    : sampled ? `[${sampling} · artifact://${id}]` : `[${sampling} · full output: artifact://${id}]`;
+    ? `[${sampling} · OMP omitted ${footer[2]} of ${footer[1]} source lines · full output: ${spillUri}]`
+    : continuation ? `[${sampling} · OMP showed ${continuation[1]}-${continuation[2]} of ${continuation[3]} source lines · continue source at :${continuation[4]} · partial result: ${spillUri}]`
+    : sampled ? `[${sampling} · ${spillUri}]` : `[${sampling} · full output: ${spillUri}]`;
+  const noticeRows = widthMode ? visualRows(notice, { ...limits, longLines: "wrap" }) : 1;
+  const preview = widthMode
+    ? visualPreview(sampled ? sampled.text : lines.join("\n"), limits, Math.max(0, limits.maxLines - noticeRows))
+    : sampled ? sampled.text : lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
   const nonText = event.content.filter(block => block.type !== "text");
   const details = event.details ? { ...event.details } : undefined;
   if (details && event.toolName === "read") {
@@ -122,7 +158,7 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;
   }
   if (details && ["grep", "ast_grep", "ast_edit"].includes(event.toolName) && typeof details.displayContent === "string") {
-    details.displayContent = `${details.displayContent.split(/\r?\n/).slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`;
+    details.displayContent = `${widthMode ? visualPreview(details.displayContent, limits, Math.max(0, limits.maxLines - noticeRows)) : details.displayContent.split(/\r?\n/).slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`;
   }
   if (details && event.toolName === "glob" && Array.isArray(details.files)) {
     delete details.fileCount;
@@ -130,13 +166,13 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     details.truncated = true;
   }
   if (details && event.toolName === "task" && Array.isArray(details.results)) {
-    let remainingLines = limits.maxLines - 1;
+    let remainingLines = Math.max(0, limits.maxLines - (widthMode ? noticeRows : 1));
     let remainingChars = limits.maxPreviewChars;
     let noticeAdded = false;
     details.results = details.results.map((item: unknown) => {
       if (!item || typeof item !== "object" || !("output" in item) || typeof item.output !== "string") return item;
-      const visible = item.output.split(/\r?\n/).slice(0, remainingLines).join("\n").slice(0, remainingChars);
-      remainingLines -= visible ? visible.split("\n").length : 0;
+      const visible = widthMode ? visualPreview(item.output, { ...limits, maxPreviewChars: remainingChars }, remainingLines) : item.output.split(/\r?\n/).slice(0, remainingLines).join("\n").slice(0, remainingChars);
+      remainingLines -= visible ? visualRows(visible, limits) : 0;
       remainingChars -= visible.length;
       const shortened = visible !== item.output;
       const output = shortened && !noticeAdded ? `${visible}${visible ? "\n" : ""}${notice}` : visible;
@@ -145,13 +181,13 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     });
   }
   if (details && event.toolName === "eval" && Array.isArray(details.cells)) {
-    let remainingLines = limits.maxLines - 1;
+    let remainingLines = Math.max(0, limits.maxLines - (widthMode ? noticeRows : 1));
     let remainingChars = limits.maxPreviewChars;
     let noticeAdded = false;
     details.cells = details.cells.map((cell: unknown) => {
       if (!cell || typeof cell !== "object" || !("output" in cell) || typeof cell.output !== "string") return cell;
-      const visible = cell.output.split(/\r?\n/).slice(0, remainingLines).join("\n").slice(0, remainingChars);
-      remainingLines -= visible ? visible.split("\n").length : 0;
+      const visible = widthMode ? visualPreview(cell.output, { ...limits, maxPreviewChars: remainingChars }, remainingLines) : cell.output.split(/\r?\n/).slice(0, remainingLines).join("\n").slice(0, remainingChars);
+      remainingLines -= visible ? visualRows(visible, limits) : 0;
       remainingChars -= visible.length;
       const shortened = visible !== cell.output;
       const output = shortened && !noticeAdded ? `${visible}${visible ? "\n" : ""}${notice}` : visible;
@@ -185,12 +221,12 @@ export function parseCommand(args: string, current: Override): { next: Override;
 }
 
 const exactReadNote = (maxLines: number) =>
-  `Tool results may be shortened by line or character limits. To see exact source lines, request a read range of at most ${maxLines} lines: \`read <path>:START-END\`, or \`read artifact://ID:START-END\` for a saved result. Long lines can still exceed the character limit.`;
+  `Tool results may be shortened by line or character limits. To see exact source lines, request a read range of at most ${maxLines} lines: \`read <path>:START-END\`, or \`read local://ID.log:START-END\` for a saved result. Long lines can still be shortened, including in explicit ranges.`;
 
 const strideNote = [
   "Tool results longer than the limit may arrive as an evenly spaced sample of lines (each sample point may carry a few context lines), not a contiguous block.",
-  "Each sampled line starts with its original line number; the first and last lines are kept; the result ends with a [sampled K/N lines · artifact://ID] notice.",
-  "Do not assume skipped lines are empty or irrelevant. For read results, use original source line numbers with the original path; artifact line numbers are offsets in the saved result and may not match source lines. For other results, zoom in with `read artifact://ID:START-END`.",
+  "Sampled lines start with their original line numbers; the result ends with a [sampled K/N lines · local://ID.log] notice. A visual-width limit can shorten the sample, including its last line.",
+  "Do not assume skipped lines are empty or irrelevant. For read results, use original source line numbers with the original path (`read <path>:START-END`); saved-result line numbers in `local://ID.log` are offsets in the saved output and may not match source lines. For other tools, zoom in with `read local://ID.log:START-END`.",
 ].join(" ");
 
 type Pi = {

@@ -5,6 +5,48 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import toolOutputLines, { limitResult, loadLimits, parseCommand, type Context, type Result } from "./limit.ts";
 
+const widthLimits = { maxLines: 5, maxPreviewChars: 10000, mode: "head" as const, before: 0, after: 0, lineWidth: 40 };
+const widthStore = { sessionManager: { saveArtifact: async () => "1" } };
+const rows = (text: string, width: number) => text.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil([...line].length / width)), 0);
+
+describe("long-line modes", () => {
+  test("wrap counts a long line against the visual budget and preserves the artifact", async () => {
+    const text = "x".repeat(1000);
+    let saved = "";
+    const output = await limitResult({ toolName: "bash", content: [{ type: "text", text }] }, { sessionManager: { saveArtifact: async value => { saved = value; return "1"; } } }, { ...widthLimits, longLines: "wrap" });
+    expect(saved).toBe(text);
+    expect(rows(output!.content[0].text!, 40)).toBeLessThanOrEqual(5);
+    expect(output!.content[0].text).toContain("local://1.log");
+  });
+  test("truncate marks shortened lines and saves their full text", async () => {
+    const text = `${"a".repeat(60)}\nshort`;
+    let saved = "";
+    const output = await limitResult({ toolName: "bash", content: [{ type: "text", text }] }, { sessionManager: { saveArtifact: async value => { saved = value; return "1"; } } }, { ...widthLimits, longLines: "truncate" });
+    expect(saved).toBe(text);
+    expect(output!.content[0].text).toContain(`${"a".repeat(39)}…\nshort`);
+    expect(rows(output!.content[0].text!, 40)).toBeLessThanOrEqual(5);
+  });
+  test("preserve retains the existing behavior", async () => {
+    const text = "x".repeat(1000);
+    expect(await limitResult({ toolName: "bash", content: [{ type: "text", text }] }, widthStore, { ...widthLimits, longLines: "preserve" })).toBeUndefined();
+  });
+  test("explicit read ranges cannot bypass visual limits", async () => {
+    const text = `1|${"x".repeat(1000)}`;
+    const output = await limitResult({ toolName: "read", input: { path: "/tmp/file:1-1" }, content: [{ type: "text", text }], details: { displayContent: { text } } }, widthStore, { ...widthLimits, longLines: "wrap" });
+    expect(rows(output!.content[0].text!, 40)).toBeLessThanOrEqual(5);
+    expect((output!.details!.displayContent as { text: string }).text).toBe(output!.content[0].text);
+  });
+  test("structured task, eval and grep previews obey the visual budget", async () => {
+    const text = "z".repeat(1000);
+    for (const toolName of ["task", "eval", "grep"]) {
+      const details = toolName === "task" ? { results: [{ output: text }] } : toolName === "eval" ? { cells: [{ output: text, views: [] }] } : { displayContent: text };
+      const output = await limitResult({ toolName, content: [{ type: "text", text }], details }, widthStore, { ...widthLimits, longLines: "wrap" });
+      const rendered = toolName === "task" ? (output!.details!.results as { output: string }[])[0].output : toolName === "eval" ? (output!.details!.cells as { output: string }[])[0].output : output!.details!.displayContent as string;
+      expect(rows(rendered, 40)).toBeLessThanOrEqual(5);
+    }
+  });
+});
+
 const result = (text: string) => ({ toolName: "bash", content: [{ type: "text", text }] });
 
 describe("tool output line limit", () => {
@@ -282,6 +324,18 @@ describe("tool output line limit", () => {
       const output = await limitResult(result("one\ntwo\nthree\nfour"), { sessionManager: { saveArtifact: async () => "1" } }, limits);
       expect(output!.content[0].text!.split("\n")).toHaveLength(3);
       expect(limits).toEqual({ maxLines: 3, maxPreviewChars: 30, mode: "head", before: 0, after: 0 });
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test("inherits and overrides long-line configuration", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "output-limit-"));
+    try {
+      const path = join(dir, "config.json");
+      await writeFile(path, JSON.stringify({ maxLines: 10, maxPreviewChars: 2000, longLines: "wrap", lineWidth: 80, tools: { grep: { longLines: "truncate", lineWidth: 120 } } }));
+      expect(await loadLimits(path, "read")).toMatchObject({ longLines: "wrap", lineWidth: 80 });
+      expect(await loadLimits(path, "grep")).toMatchObject({ longLines: "truncate", lineWidth: 120 });
+      await writeFile(path, JSON.stringify({ maxLines: 10, maxPreviewChars: 2000, longLines: "invalid" }));
+      expect(await loadLimits(path)).not.toHaveProperty("longLines");
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
