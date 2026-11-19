@@ -94,9 +94,11 @@ function sample(lines: string[], limits: Limits, startLine = 1, raw = false) {
     const picked = [...keep].sort((a, b) => a - b);
     return { picked, text: picked.map(i => (numbered || i < first ? lines[i] : `${i + startLine}| ${lines[i]}`)).join("\n") };
   };
-  let points = Math.max(2, Math.floor(budget / (1 + limits.before + limits.after)));
-  let out = build(points, limits.before, limits.after);
-  while ((out.picked.length > budget || out.text.length > limits.maxPreviewChars) && points > 2) out = build(--points, limits.before, limits.after);
+  const before = limits.before ?? 0;
+  const after = limits.after ?? 0;
+  let points = Math.max(2, Math.floor((budget + before + after) / (1 + before + after)));
+  let out = build(points, before, after);
+  while ((out.picked.length > budget || out.text.length > limits.maxPreviewChars) && points > 2) out = build(--points, before, after);
   if (out.picked.length > budget) out = build(2, 0, 0);
   return { ...out, text: out.text.slice(0, limits.maxPreviewChars) };
 }
@@ -173,7 +175,7 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
       details.displayContent = { ...rest, startLine: 1, text: `${preview}${preview ? "\n" : ""}${notice}` };
       details.contentType = "text/plain"; // Markdown rendering would join the `N|` lines into paragraphs.
     }
-    if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;
+    if (typeof path === "string" && /^(?:artifact|local):\/\//.test(path)) delete details.resolvedPath;
   }
   if (details && ["grep", "ast_grep", "ast_edit"].includes(event.toolName) && typeof details.displayContent === "string") {
     const visible = widthMode ? visualPreview(details.displayContent, effectiveLimits, Math.max(0, effectiveLimits.maxLines - noticeRows)) : details.displayContent.split(/\r?\n/).slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);

@@ -194,6 +194,8 @@ describe("tool output line limit", () => {
     expect(text[text.length - 3]).toBe("99|row 99");
     const huge = await limitResult(result(numbered), store, { maxLines: 4, maxPreviewChars: 2000, mode: "stride", before: 5, after: 5 });
     expect((huge?.content[0] as { text: string }).text.split("\n").length).toBeLessThanOrEqual(4);
+    const thirty = await limitResult(result(numbered), store, { maxLines: 30, maxPreviewChars: 4000, mode: "stride", before: 1, after: 1 });
+    expect((thirty?.content[0] as { text: string }).text.split("\n").at(-1)).toBe("[sampled 28/100 lines · local://7.log]");
   });
 
   test("read artifact is saved without N| prefixes so reading it back does not double them", async () => {
@@ -372,6 +374,8 @@ describe("tool output line limit", () => {
     const ctx = { sessionManager: { saveArtifact: async () => "5" } };
     const limits = { maxLines: 10, maxPreviewChars: 2000, mode: "stride" as const, before: 0, after: 0 };
     expect(await limitResult({ toolName: "read", input: { path: "/x/a.ts:40-49" }, content: [{ type: "text", text }], details: {} }, ctx, limits)).toBeUndefined();
+    expect(await limitResult({ toolName: "read", input: { path: "/x/a.ts:40-50" }, content: [{ type: "text", text }], details: {} }, ctx, limits)).toBeUndefined();
+    expect(await limitResult({ toolName: "read", input: { path: "/x/a.ts:raw:40-49" }, content: [{ type: "text", text }], details: {} }, ctx, limits)).toBeUndefined();
     expect(await limitResult({ toolName: "read", input: { path: "/x/a.ts:40+10" }, content: [{ type: "text", text }], details: {} }, ctx, limits)).toBeUndefined();
     expect(await limitResult({ toolName: "read", input: { path: "/x/a.ts:40-60" }, content: [{ type: "text", text }], details: {} }, ctx, limits)).toBeDefined();
   });
@@ -472,7 +476,7 @@ describe("tool output line limit", () => {
     const text = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n");
     const ctx = { sessionManager: { saveArtifact: async () => "7" } };
     const limits = { maxLines: 10, maxPreviewChars: 2000, mode: "head" as const, before: 0, after: 0 };
-    const read = await limitResult({ toolName: "read", input: { path: "artifact://4" }, content: [{ type: "text", text }], details: { resolvedPath: "/long/path", displayContent: { text, startLine: 1, lineNumbers: Array.from({ length: 40 }, (_, i) => i + 1) } } }, ctx, limits);
+    const read = await limitResult({ toolName: "read", input: { path: "local://4.log" }, content: [{ type: "text", text }], details: { resolvedPath: "/long/path", displayContent: { text, startLine: 1, lineNumbers: Array.from({ length: 40 }, (_, i) => i + 1) } } }, ctx, limits);
     const display = read!.details!.displayContent as { text: string };
     expect(display.text.split("\n")).toHaveLength(10);
     expect(display.text).toContain("local://7.log");
