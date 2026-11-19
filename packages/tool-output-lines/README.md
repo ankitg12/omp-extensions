@@ -17,6 +17,12 @@ Configure `$XDG_CONFIG_HOME/omp/tool-output-lines.json`, or `~/.config/omp/tool-
 }
 ```
 
+## Recover a long line
+
+In truncate mode, an explicit `read` range automatically uses the wrap budget instead of truncating each line. Request fewer lines to give each more room. A complete line is returned when the selected output fits the visual-row and character budgets. A line larger than the budget is still cut; use another authorized method to read character slices. Native read limits also apply.
+
+The agent receives the effective settings on its first result for each tool and whenever those settings change. Per-tool overrides and session commands are included.
+
 ## Long lines
 
 Set `longLines` globally or per tool, independently of `mode`:
@@ -25,7 +31,7 @@ Set `longLines` globally or per tool, independently of `mode`:
 - `wrap` counts each `lineWidth` characters as one visual row, without inserting newlines. It cuts the preview when the row budget is exhausted.
 - `truncate` shortens each long line to `lineWidth` characters, including an ellipsis.
 
-`lineWidth` defaults to 120. The count uses Unicode code points, not terminal cell widths; tabs, wide characters and terminal gutters can make the actual display wider. A notice reserves visual rows, but an unusually narrow width or a long notice can itself exceed the limit. The saved result retains the full received output. These modes also apply to explicit read ranges.
+`lineWidth` defaults to 120. The count uses Unicode code points, not terminal cell widths; tabs, wide characters and terminal gutters can make the actual display wider. A notice reserves visual rows, but an unusually narrow width or a long notice can itself exceed the limit. The saved result retains the full received output. Explicit read ranges use the wrap budget in both wrap and truncate modes.
 
 ```json
 { "maxLines": 30, "maxPreviewChars": 4000, "longLines": "wrap", "lineWidth": 120, "tools": { "read": { "mode": "stride" } } }

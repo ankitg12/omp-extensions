@@ -5,6 +5,29 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import toolOutputLines, { limitResult, loadLimits, parseCommand, type Context, type Result } from "./limit.ts";
 
+
+describe("explicit reads and settings notifications", () => {
+  test("notifies the agent after settings change, once per tool", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "output-limit-"));
+    try {
+      const path = join(dir, "settings.json");
+      const settings = { maxLines: 10, maxPreviewChars: 2000, mode: "head", longLines: "wrap", lineWidth: 80, before: 0, after: 0 };
+      await writeFile(path, JSON.stringify(settings));
+      const handlers: Record<string, (event: Result, ctx: Context) => Promise<{ additionalContext?: string } | undefined>> = {};
+      toolOutputLines({ on: ((name: string, handler: (event: Result, ctx: Context) => Promise<{ additionalContext?: string } | undefined>) => { handlers[name] = handler; }) as never }, path);
+      const ctx = { sessionManager: { saveArtifact: async () => "1" } };
+      const event = { toolName: "read", content: [{ type: "text", text: "short" }] };
+      const first = await handlers.tool_result(event, ctx);
+      expect(first.additionalContext).toContain("maxLines=10, maxPreviewChars=2000, mode=head, longLines=wrap, lineWidth=80, before=0, after=0");
+      expect(await handlers.tool_result(event, ctx)).toBeUndefined();
+      await writeFile(path, JSON.stringify({ ...settings, maxLines: 20, maxPreviewChars: 3000, mode: "stride", longLines: "truncate", lineWidth: 120, before: 1, after: 2 }));
+      const changed = await handlers.tool_result(event, ctx);
+      expect(changed.additionalContext).toContain("maxLines=20, maxPreviewChars=3000, mode=stride, longLines=truncate, lineWidth=120, before=1, after=2");
+      expect(await handlers.tool_result(event, ctx)).toBeUndefined();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+  });
+
 const widthLimits = { maxLines: 5, maxPreviewChars: 10000, mode: "head" as const, before: 0, after: 0, lineWidth: 40 };
 const widthStore = { sessionManager: { saveArtifact: async () => "1" } };
 const rows = (text: string, width: number) => text.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil([...line].length / width)), 0);
@@ -29,6 +52,28 @@ describe("long-line modes", () => {
   test("preserve retains the existing behavior", async () => {
     const text = "x".repeat(1000);
     expect(await limitResult({ toolName: "bash", content: [{ type: "text", text }] }, widthStore, { ...widthLimits, longLines: "preserve" })).toBeUndefined();
+  });
+  test("explicit range returns full long line when it fits visual budget in truncate mode", async () => {
+    const text = "x".repeat(120);
+    const output = await limitResult({ toolName: "read", input: { path: "/tmp/file:1-1:raw" }, content: [{ type: "text", text }] }, widthStore, { ...widthLimits, longLines: "truncate" });
+    expect(output).toBeUndefined();
+  });
+  test("a raw single-line selector recovers a long line", async () => {
+    const text = "x".repeat(120);
+    expect(await limitResult({ toolName: "read", input: { path: "/tmp/file:1:raw" }, content: [{ type: "text", text }] }, widthStore, { ...widthLimits, longLines: "truncate" })).toBeUndefined();
+  });
+  test("an open-ended line selector retains per-line truncation", async () => {
+    const text = "x".repeat(120);
+    const output = await limitResult({ toolName: "read", input: { path: "/tmp/file:1" }, content: [{ type: "text", text }] }, widthStore, { ...widthLimits, longLines: "truncate" });
+    expect(output!.content[0].text).toContain(`${"x".repeat(39)}…`);
+  });
+  test("explicit range cuts oversized lines by total visual budget, not per-line width", async () => {
+    const text = "x".repeat(1000);
+    const output = await limitResult({ toolName: "read", input: { path: "/tmp/file:1-1:raw" }, content: [{ type: "text", text }] }, widthStore, { ...widthLimits, longLines: "truncate" });
+    const preview = output!.content[0].text!;
+    expect(preview.split("\n")[0].length).toBeGreaterThan(40);
+    expect(rows(preview, 40)).toBeLessThanOrEqual(5);
+    expect(preview).toContain("local://1.log");
   });
   test("explicit read ranges cannot bypass visual limits", async () => {
     const text = `1|${"x".repeat(1000)}`;
@@ -310,7 +355,7 @@ describe("tool output line limit", () => {
     const long = Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n");
     expect(await handlers.tool_result(result(long), ctx)).toBeDefined();
     await command("off", ctx);
-    expect(await handlers.tool_result(result(long), ctx)).toBeUndefined();
+    expect(await handlers.tool_result(result(long), ctx)).toEqual({ additionalContext: "tool-output-lines settings for bash: off." });
     await command("on", ctx);
     expect(await handlers.tool_result(result(long), ctx)).toBeDefined();
   });

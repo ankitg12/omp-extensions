@@ -99,8 +99,11 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     return details ? { content: event.content, details } : undefined;
   };
   const allLines = text.split(/\r?\n/);
-  const longLineChanged = limits.longLines === "truncate" && allLines.some(line => [...line].length > (limits.lineWidth ?? 120));
-  if (visualRows(text, limits) <= limits.maxLines && text.length <= limits.maxPreviewChars && !longLineChanged) return originalDisplay();
+  const selector = event.toolName === "read" ? String(event.input?.path ?? event.input?.file_path ?? "").replace(/^[A-Za-z]:/, "").match(/(?::raw)?:(\d+)(?:-(\d+)|\+(\d+))(?::raw)?$|(?::raw:(\d+)|(\d+):raw)$/) : null;
+  const explicitInLimit = selector !== null && (selector[1] ? selector[2] ? Number(selector[2]) - Number(selector[1]) + 1 : Number(selector[3]) : 1) <= limits.maxLines + 1;
+  const effectiveLimits = explicitInLimit && limits.longLines === "truncate" ? { ...limits, longLines: "wrap" as const } : limits;
+  const longLineChanged = effectiveLimits.longLines === "truncate" && allLines.some(line => [...line].length > (effectiveLimits.lineWidth ?? 120));
+  if (visualRows(text, effectiveLimits) <= effectiveLimits.maxLines && text.length <= effectiveLimits.maxPreviewChars && !longLineChanged) return originalDisplay();
   const candidate = event.toolName === "read" ? allLines.at(-1)?.match(/^\[Showing lines .+ of (\d+); (\d+) middle lines \([^\]]+\) elided\..*Read (?:local:\/\/([^\s.\]]+)\.log|artifact:\/\/([^\s\]]+)) for full output\]$/) : null;
   const candidateId = candidate?.[3] ?? candidate?.[4];
   const meta = event.details?.meta;
@@ -111,8 +114,6 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
   const continuation = page && pageMeta && pageMeta.start === Number(page[1]) && pageMeta.end === Number(page[2]) && "totalLines" in truncation && truncation.totalLines === Number(page[3]) && "nextOffset" in truncation && truncation.nextOffset === Number(page[4]) ? page : null;
   const lines = footer || continuation ? allLines.slice(0, -1) : allLines;
   // An explicit range within the limit is a request for exact lines; OMP adds context lines and a footer around it.
-  const selector = event.toolName === "read" ? String(event.input?.path ?? event.input?.file_path ?? "").replace(/^[A-Za-z]:/, "").match(/(?::raw)?:(\d+)(?:-(\d+)|\+(\d+))?(?::raw)?$/) : null;
-  const explicitInLimit = selector !== null && (selector[2] ? Number(selector[2]) - Number(selector[1]) + 1 : selector[3] ? Number(selector[3]) : 1) <= limits.maxLines + 1;
   if (explicitInLimit && text.length <= limits.maxPreviewChars && (limits.longLines === undefined || limits.longLines === "preserve")) return originalDisplay();
 
   const path = event.input?.path ?? event.input?.file_path;
@@ -137,9 +138,9 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     ? `[${sampling} · OMP omitted ${footer[2]} of ${footer[1]} source lines · full output: ${spillUri}]`
     : continuation ? `[${sampling} · OMP showed ${continuation[1]}-${continuation[2]} of ${continuation[3]} source lines · continue source at :${continuation[4]} · partial result: ${spillUri}]`
     : sampled ? `[${sampling} · ${spillUri}]` : `[${sampling} · full output: ${spillUri}]`;
-  const noticeRows = widthMode ? visualRows(notice, { ...limits, longLines: "wrap" }) : 1;
+  const noticeRows = widthMode ? visualRows(notice, { ...effectiveLimits, longLines: "wrap" }) : 1;
   const preview = widthMode
-    ? visualPreview(sampled ? sampled.text : lines.join("\n"), limits, Math.max(0, limits.maxLines - noticeRows))
+    ? visualPreview(sampled ? sampled.text : lines.join("\n"), effectiveLimits, Math.max(0, effectiveLimits.maxLines - noticeRows))
     : sampled ? sampled.text : lines.slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars);
   const nonText = event.content.filter(block => block.type !== "text");
   const details = event.details ? { ...event.details } : undefined;
@@ -158,7 +159,7 @@ export async function limitResult(event: Result, ctx: Context, limits: Limits = 
     if (typeof path === "string" && path.startsWith("artifact://")) delete details.resolvedPath;
   }
   if (details && ["grep", "ast_grep", "ast_edit"].includes(event.toolName) && typeof details.displayContent === "string") {
-    details.displayContent = `${widthMode ? visualPreview(details.displayContent, limits, Math.max(0, limits.maxLines - noticeRows)) : details.displayContent.split(/\r?\n/).slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`;
+    details.displayContent = `${widthMode ? visualPreview(details.displayContent, effectiveLimits, Math.max(0, effectiveLimits.maxLines - noticeRows)) : details.displayContent.split(/\r?\n/).slice(0, limits.maxLines - 1).join("\n").slice(0, limits.maxPreviewChars)}\n${notice}`;
   }
   if (details && event.toolName === "glob" && Array.isArray(details.files)) {
     delete details.fileCount;
@@ -235,16 +236,20 @@ type Pi = {
   registerCommand?: (name: string, def: { description?: string; handler: (args: string, ctx: { ui: { notify(message: string, level?: string): void } }) => Promise<void> }) => void;
 };
 
-export default function toolOutputLines(pi: Pi) {
+export default function toolOutputLines(pi: Pi, settingsPath = configPath) {
   let override: Override = { off: false };
+  const lastSettings = new Map<string, string>();
   pi.on("tool_result", async (event, ctx) => {
-    if (override.off) return;
-    const limits = await loadLimits(configPath, event.toolName);
+    const limits = await loadLimits(settingsPath, event.toolName);
     if (override.maxLines) limits.maxLines = override.maxLines;
     if (override.mode) limits.mode = override.mode;
     if (override.before !== undefined) limits.before = override.before;
     if (override.after !== undefined) limits.after = override.after;
-    return limitResult(event, ctx, limits);
+    const settings = override.off ? "off" : `maxLines=${limits.maxLines}, maxPreviewChars=${limits.maxPreviewChars}, mode=${limits.mode}, longLines=${limits.longLines ?? "preserve"}, lineWidth=${limits.lineWidth ?? 120}, before=${limits.before}, after=${limits.after}`;
+    const changed = lastSettings.get(event.toolName) !== settings;
+    lastSettings.set(event.toolName, settings);
+    const result = override.off ? undefined : await limitResult(event, ctx, limits);
+    return changed ? { ...result, additionalContext: `tool-output-lines settings for ${event.toolName}: ${settings}.` } : result;
   });
   pi.on("before_agent_start", async event => {
     if (override.off) return;
@@ -255,12 +260,12 @@ export default function toolOutputLines(pi: Pi) {
     let stride = sampling(override.mode);
     if (!stride && override.mode === undefined) {
       try {
-        const config = JSON.parse(await readFile(configPath, "utf8"));
+        const config = JSON.parse(await readFile(settingsPath, "utf8"));
         stride = sampling(config.mode) || Object.values(config.tools ?? {}).some(tool => !!tool && typeof tool === "object" && "mode" in tool && sampling(tool.mode));
       } catch {}
     }
-    const { maxLines } = await loadLimits(configPath, "read");
-    const note = `${exactReadNote(maxLines)}${stride ? `\n\n${strideNote}` : ""}`;
+    const { maxLines } = await loadLimits(settingsPath, "read");
+    const note = `${exactReadNote(maxLines)} For long lines, request a shorter explicit read range: it uses the visual-row budget rather than per-line truncation. A line that exceeds the budget still needs character slicing by another authorized method.${stride ? `\n\n${strideNote}` : ""}`;
     return { systemPrompt: isArray ? [...(event.systemPrompt as string[]), note] : `${event.systemPrompt}\n\n${note}` };
   });
   pi.registerCommand?.("tool-lines", {
